@@ -199,18 +199,18 @@ mod tests {
 
     #[test]
     fn matcher_requires_all_terms_case_insensitive() {
-        let matcher = Matcher::new("imalab crítico", false).unwrap();
-        assert!(matcher.is_match("ImaLab agente crítico"));
-        assert!(!matcher.is_match("ImaLab agente"));
+        let matcher = Matcher::new("smartup crítico", false).unwrap();
+        assert!(matcher.is_match("SmartUp agente crítico"));
+        assert!(!matcher.is_match("SmartUp agente"));
     }
 
     #[test]
     fn snippet_handles_unicode_boundaries() {
         let snippet = highlightless_snippet(
-            "Buenas, necesito revisar Imalab. En promedio, ¿cuánto demora?",
-            "imalab",
+            "Buenas, necesito revisar SmartUp. En promedio, ¿cuánto demora?",
+            "smartup",
         );
-        assert!(snippet.contains("Imalab"));
+        assert!(snippet.contains("SmartUp"));
         assert!(snippet.contains("¿cuánto"));
     }
 }
