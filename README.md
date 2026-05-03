@@ -14,6 +14,13 @@ brew install satelerd/tap/fainder
 Fainder uses `ripgrep` for fast transcript search. The Homebrew formula installs
 it automatically.
 
+To update an existing install:
+
+```bash
+brew update
+brew upgrade fainder
+```
+
 ## Quick Start
 
 ```bash

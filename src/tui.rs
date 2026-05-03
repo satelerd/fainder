@@ -32,6 +32,13 @@ pub fn run(config: Config) -> Result<()> {
     ratatui::restore();
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
+    if result.is_ok() {
+        println!("\x1b[2m╭────────────────────────────────────────╮\x1b[0m");
+        println!(
+            "\x1b[2m│\x1b[0m \x1b[36mMay the agents vibe with you.\x1b[0m       \x1b[2m│\x1b[0m"
+        );
+        println!("\x1b[2m╰────────────────────────────────────────╯\x1b[0m");
+    }
     result
 }
 
@@ -61,7 +68,7 @@ impl App {
             results: Vec::new(),
             selected: 0,
             list_state: ListState::default(),
-            status: "Type a query to search local agent conversations.".to_string(),
+            status: String::new(),
             providers: Vec::new(),
             regex: false,
             full_text: true,
@@ -136,7 +143,7 @@ impl App {
                     self.results.clear();
                     self.selected = 0;
                     self.search_due = None;
-                    self.status = "Type a query to search local agent conversations.".to_string();
+                    self.status.clear();
                 } else {
                     self.schedule_search();
                 }
@@ -299,7 +306,7 @@ impl App {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(10),
-                Constraint::Length(2),
+                Constraint::Length(1),
             ])
             .split(area);
 
@@ -403,25 +410,53 @@ impl App {
     fn draw_empty_help(&self, frame: &mut Frame, area: Rect) {
         let lines = vec![
             Line::from(Span::styled(
-                "Find the conversation you want to resume",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                "Find a conversation to resume",
+                Style::default().fg(Color::Rgb(142, 202, 230)),
             )),
             Line::from(""),
-            Line::from("Start typing a project, client, bug, repo, or topic name."),
-            Line::from("Examples: SmartUp, bedrock latency, shapeup tasks, multi-channel."),
-            Line::from(
-                "Multiple words narrow the search. `SmartUp agents` means both words must match.",
-            ),
+            Line::from(vec![
+                Span::styled("Search for ", Style::default().fg(Color::Gray)),
+                Span::styled("a project", Style::default().fg(Color::LightYellow)),
+                Span::styled(", ", Style::default().fg(Color::Gray)),
+                Span::styled("repo", Style::default().fg(Color::LightGreen)),
+                Span::styled(", ", Style::default().fg(Color::Gray)),
+                Span::styled("bug", Style::default().fg(Color::LightMagenta)),
+                Span::styled(", client, or topic.", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(Span::styled(
+                "Fainder looks across local Codex, Claude Code, OpenCode, and Hermes histories.",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(""),
-            Line::from("Useful controls:"),
-            Line::from("  Tab      cycle providers"),
-            Line::from("  Ctrl-f   switch between titles only and full transcript search"),
-            Line::from("  Ctrl-r   regex mode, for queries like SmartUp|bedrock"),
-            Line::from("  Enter    copy the resume command"),
-            Line::from("  Ctrl-o   open the selected conversation"),
-            Line::from("  Ctrl-p   preview snippets and latest messages"),
+            Line::from(vec![
+                Span::styled("Examples  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("SmartUp", Style::default().fg(Color::Rgb(142, 202, 230))),
+                Span::styled("   bedrock latency   ", Style::default().fg(Color::Gray)),
+                Span::styled("shapeup tasks", Style::default().fg(Color::LightGreen)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Words narrow results: ",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled("SmartUp agents", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    " matches conversations containing both.",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Controls  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Tab", Style::default().fg(Color::Gray)),
+                Span::styled(" providers   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl-f", Style::default().fg(Color::Gray)),
+                Span::styled(" scope   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl-r", Style::default().fg(Color::Gray)),
+                Span::styled(" regex   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl-p", Style::default().fg(Color::Gray)),
+                Span::styled(" preview", Style::default().fg(Color::DarkGray)),
+            ]),
         ];
         let help = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
             conversations_block(self.conversations_title())
@@ -515,13 +550,14 @@ impl App {
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
         let help = "Enter copy   Ctrl-o open   Ctrl-p preview   Tab provider   Ctrl-r regex   Ctrl-f scope   Esc quit";
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(help, Style::default().fg(Color::DarkGray))),
-                Line::from(Span::styled(
-                    self.status.clone(),
-                    Style::default().fg(Color::Yellow),
-                )),
-            ]),
+            Paragraph::new(Line::from(vec![
+                Span::styled(help, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if self.status.is_empty() { "" } else { "   " },
+                    Style::default(),
+                ),
+                Span::styled(self.status.clone(), Style::default().fg(Color::Yellow)),
+            ])),
             area,
         );
     }
