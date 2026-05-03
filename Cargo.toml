@@ -1,0 +1,22 @@
+[package]
+name = "fainder"
+version = "0.1.0"
+edition = "2024"
+description = "Live universal finder for local AI agent conversations"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+arboard = "3.4"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+dirs = "6.0"
+ratatui = "0.29"
+regex = "1.11"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shell-escape = "0.1"
+toml = "0.8"
+walkdir = "2.5"
