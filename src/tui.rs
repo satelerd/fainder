@@ -1,5 +1,6 @@
 use std::io;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -21,7 +22,7 @@ use crate::config::Config;
 use crate::model::{ProviderKind, SearchOptions, SearchResult};
 use crate::search;
 
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(800);
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(450);
 
 pub fn run(config: Config) -> Result<()> {
     enable_raw_mode()?;
@@ -48,6 +49,8 @@ struct App {
     preview_scroll: u16,
     search_due: Option<Instant>,
     searching: bool,
+    search_rx: Option<Receiver<Result<Vec<SearchResult>, String>>>,
+    search_seq: u64,
 }
 
 impl App {
@@ -66,6 +69,8 @@ impl App {
             preview_scroll: 0,
             search_due: None,
             searching: false,
+            search_rx: None,
+            search_seq: 0,
         }
     }
 
@@ -84,8 +89,9 @@ impl App {
                 .search_due
                 .is_some_and(|deadline| Instant::now() >= deadline)
             {
-                self.search_now();
+                self.start_search();
             }
+            self.poll_search();
         }
         Ok(())
     }
@@ -102,11 +108,11 @@ impl App {
                     match ch {
                         'r' => {
                             self.regex = !self.regex;
-                            self.search_now();
+                            self.schedule_search();
                         }
                         'f' => {
                             self.full_text = !self.full_text;
-                            self.search_now();
+                            self.schedule_search();
                         }
                         'o' => {
                             self.open_selected()?;
@@ -143,7 +149,7 @@ impl App {
             KeyCode::Tab => self.cycle_provider(),
             KeyCode::F(2) => {
                 self.full_text = !self.full_text;
-                self.search_now();
+                self.schedule_search();
             }
             _ => {}
         }
@@ -151,16 +157,20 @@ impl App {
         Ok(false)
     }
 
-    fn search_now(&mut self) {
+    fn start_search(&mut self) {
         self.search_due = None;
         if self.query.trim().len() < 2 {
             self.results.clear();
             self.selected = 0;
             self.list_state.select(None);
-            self.status = "Type at least two characters.".to_string();
+            self.status.clear();
             return;
         }
+        self.search_seq = self.search_seq.wrapping_add(1);
+        let seq = self.search_seq;
+        let config = self.config.clone();
         self.searching = true;
+        self.status.clear();
         let options = SearchOptions {
             query: self.query.clone(),
             providers: self.providers.clone(),
@@ -168,19 +178,38 @@ impl App {
             limit: 50,
             full_text: self.full_text,
         };
-        match search::search(&self.config, &options) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = search::search(&config, &options).map_err(|error| error.to_string());
+            let _ = tx.send(if seq == 0 {
+                Err("stale search".to_string())
+            } else {
+                result
+            });
+        });
+        self.search_rx = Some(rx);
+    }
+
+    fn poll_search(&mut self) {
+        let Some(rx) = &self.search_rx else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.search_rx = None;
+        self.searching = false;
+        match result {
             Ok(results) => {
                 self.results = results;
                 self.selected = self.selected.min(self.results.len().saturating_sub(1));
                 self.list_state
                     .select((!self.results.is_empty()).then_some(self.selected));
-                self.status = format!("{} results", self.results.len());
             }
             Err(error) => {
                 self.status = error.to_string();
             }
         }
-        self.searching = false;
     }
 
     fn schedule_search(&mut self) {
@@ -189,11 +218,11 @@ impl App {
             self.results.clear();
             self.selected = 0;
             self.list_state.select(None);
-            self.status = "Type at least two characters.".to_string();
+            self.status.clear();
             return;
         }
         self.search_due = Some(Instant::now() + SEARCH_DEBOUNCE);
-        self.status = "Waiting for typing to pause...".to_string();
+        self.status.clear();
     }
 
     fn toggle_preview(&mut self) {
@@ -270,7 +299,7 @@ impl App {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(10),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
 
@@ -289,15 +318,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        let marker = if self.searching {
-            "⌕ searching  "
-        } else if self.search_due.is_some() {
-            "⌕ queued  "
-        } else {
-            ""
-        };
         let title = format!(
-            " Fainder  {marker}provider:{provider}  mode:{}  scope:{} ",
+            " Fainder  provider:{provider}  mode:{}  scope:{} ",
             if self.regex { "regex" } else { "words" },
             if self.full_text {
                 "all text"
@@ -335,7 +357,7 @@ impl App {
             return;
         }
 
-        if self.search_due.is_some() && self.results.is_empty() {
+        if (self.search_due.is_some() || self.searching) && self.results.is_empty() {
             self.draw_searching(frame, area);
             return;
         }
@@ -370,9 +392,7 @@ impl App {
             .collect::<Vec<_>>();
         let list = List::new(items)
             .block(
-                rounded_block()
-                    .borders(Borders::ALL)
-                    .title(" Conversations ")
+                conversations_block(self.conversations_title())
                     .border_style(Style::default().fg(Color::Blue)),
             )
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
@@ -383,54 +403,52 @@ impl App {
     fn draw_empty_help(&self, frame: &mut Frame, area: Rect) {
         let lines = vec![
             Line::from(Span::styled(
-                "Search local agent conversations",
+                "Find the conversation you want to resume",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("Type a word like imalab, bedrock, shapeup, or a repo/client name."),
-            Line::from("Multiple words are AND-matched: imalab latency finds both words."),
-            Line::from("Ctrl-r switches to regex mode for patterns like imalab|bedrock."),
-            Line::from("Ctrl-f toggles scope: titles only vs all transcript text."),
-            Line::from("Tab cycles providers: all, codex, claude, opencode, hermes."),
-            Line::from("Enter copies the resume command. Ctrl-o opens it directly."),
-            Line::from("Ctrl-p opens preview; PgUp/PgDn scrolls preview text."),
+            Line::from("Start typing a project, client, bug, repo, or topic name."),
+            Line::from("Examples: SmartUp, bedrock latency, shapeup tasks, multi-channel."),
+            Line::from(
+                "Multiple words narrow the search. `SmartUp agents` means both words must match.",
+            ),
             Line::from(""),
-            Line::from(Span::styled(
-                "No database. No indexing. Fainder reads provider histories live.",
-                Style::default().fg(Color::DarkGray),
-            )),
+            Line::from("Useful controls:"),
+            Line::from("  Tab      cycle providers"),
+            Line::from("  Ctrl-f   switch between titles only and full transcript search"),
+            Line::from("  Ctrl-r   regex mode, for queries like SmartUp|bedrock"),
+            Line::from("  Enter    copy the resume command"),
+            Line::from("  Ctrl-o   open the selected conversation"),
+            Line::from("  Ctrl-p   preview snippets and latest messages"),
         ];
         let help = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
-            rounded_block()
-                .borders(Borders::ALL)
-                .title(" Conversations ")
+            conversations_block(self.conversations_title())
                 .border_style(Style::default().fg(Color::Blue)),
         );
         frame.render_widget(help, area);
     }
 
     fn draw_searching(&self, frame: &mut Frame, area: Rect) {
+        let title = self.conversations_title();
+        let message = if self.search_due.is_some() {
+            "Waiting for you to stop typing..."
+        } else {
+            "Searching conversations..."
+        };
         let help = Paragraph::new(vec![
             Line::from(Span::styled(
-                "⌕ waiting for typing to pause...",
+                message,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(
-                "Fainder waits briefly before searching so the machine does not lag while you type.",
-            ),
+            Line::from("Results will appear here as soon as the search finishes."),
         ])
         .wrap(Wrap { trim: true })
-        .block(
-            rounded_block()
-                .borders(Borders::ALL)
-                .title(" Conversations ")
-                .border_style(Style::default().fg(Color::Blue)),
-        );
+        .block(conversations_block(title).border_style(Style::default().fg(Color::Blue)));
         frame.render_widget(help, area);
     }
 
@@ -495,14 +513,29 @@ impl App {
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let help = format!(
-            "{}  |  Enter copy  Ctrl-p preview  Ctrl-o open  Ctrl-y copy  Tab provider  Ctrl-r regex  Ctrl-f scope  Esc quit",
-            self.status
-        );
+        let help = "Enter copy   Ctrl-o open   Ctrl-p preview   Tab provider   Ctrl-r regex   Ctrl-f scope   Esc quit";
         frame.render_widget(
-            Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(vec![
+                Line::from(Span::styled(help, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    self.status.clone(),
+                    Style::default().fg(Color::Yellow),
+                )),
+            ]),
             area,
         );
+    }
+
+    fn conversations_title(&self) -> String {
+        if self.search_due.is_some() {
+            " Conversations  ⌕ waiting ".to_string()
+        } else if self.searching {
+            " Conversations  ⌕ searching ".to_string()
+        } else if !self.results.is_empty() {
+            format!(" Conversations  {} results ", self.results.len())
+        } else {
+            " Conversations ".to_string()
+        }
     }
 }
 
@@ -517,6 +550,10 @@ fn provider_color(provider: ProviderKind) -> Color {
 
 fn rounded_block<'a>() -> Block<'a> {
     Block::default().border_set(symbols::border::ROUNDED)
+}
+
+fn conversations_block<'a>(title: String) -> Block<'a> {
+    rounded_block().borders(Borders::ALL).title(title)
 }
 
 fn truncate(value: &str, max: usize) -> String {
