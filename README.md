@@ -39,6 +39,7 @@ Agents should usually use non-interactive search:
 ```bash
 fainder search SmartUp
 fainder search SmartUp --provider codex,claude --json
+fainder search SmartUp --scope metadata --preview --limit 5
 fainder doctor
 ```
 
@@ -71,6 +72,9 @@ fainder doctor
 fainder search "SmartUp agents" --json --limit 10
 fainder search "bedrock latency" --provider codex,claude --json --limit 5
 fainder search "SmartVOC|SmartOrders|multichannel" --regex --json --limit 15
+fainder search "SmartUp agents" --scope metadata --preview --limit 5
+fainder search "SmartUp agents" --command-only --select 1
+fainder search "SmartUp agents" --copy --select 1
 ```
 
 JSON results include `provider`, `id`, `title`, `cwd`, `updated_at`,
@@ -78,6 +82,20 @@ JSON results include `provider`, `id`, `title`, `cwd`, `updated_at`,
 
 Do not blindly execute the first `resume_command`. Inspect the candidate first,
 then run or show the command once the intended conversation is clear.
+
+Useful non-interactive flags:
+
+- `--json`: machine-readable output for agents and integrations.
+- `--provider codex,claude`: search only selected providers.
+- `--scope all`: search metadata and full transcript content. This is the default.
+- `--scope metadata`: search title, path, and recent messages only.
+- `--regex`: treat the query as a case-insensitive regex.
+- `--preview`: include snippets and latest messages in text output.
+- `--command-only`: print only the selected resume command.
+- `--copy`: copy the selected resume command.
+- `--open`: execute the selected resume command.
+- `--select N`: choose the one-based result used by `--command-only`, `--copy`, or `--open`.
+- `--limit N`: cap result count.
 
 ## Skill
 
@@ -89,6 +107,20 @@ skills/fainder/SKILL.md
 
 Agent harnesses that support skills can load that file to learn how to install,
 query, parse, and safely use Fainder.
+
+## Raycast
+
+The repo includes a Raycast extension that uses the Fainder CLI instead of
+duplicating provider parsers:
+
+```bash
+cd raycast
+npm install --cache /private/tmp/fainder-npm-cache
+npm run dev
+```
+
+The extension calls `fainder search <query> --json`, lists conversations, and
+lets you copy or open the selected `resume_command`.
 
 ## Search Model
 

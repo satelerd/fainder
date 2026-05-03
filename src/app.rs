@@ -1,11 +1,11 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::config::Config;
 use crate::model::SearchResult;
 use crate::providers;
 
-pub fn print_results(results: &[SearchResult]) {
-    for result in results {
+pub fn print_results(results: &[SearchResult], preview: bool) {
+    for (index, result) in results.iter().enumerate() {
         let cwd = result
             .cwd
             .as_ref()
@@ -16,10 +16,45 @@ pub fn print_results(results: &[SearchResult]) {
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "[{}] {}  {}  {}\n  {}\n  {}\n",
-            result.provider, updated, result.title, cwd, result.matched_in, result.resume_command
+            "{}. [{}] {}  {}  {}\n  matched: {}  score: {}\n  command: {}\n",
+            index + 1,
+            result.provider,
+            updated,
+            result.title,
+            cwd,
+            result.matched_in,
+            result.score,
+            result.resume_command
+        );
+        if preview {
+            if !result.snippets.is_empty() {
+                println!("  snippets:");
+                for snippet in &result.snippets {
+                    println!("    - {}", one_line(snippet));
+                }
+            }
+            if !result.latest_messages.is_empty() {
+                println!("  latest:");
+                for message in &result.latest_messages {
+                    println!("    - {}", one_line(message));
+                }
+            }
+            println!();
+        }
+    }
+}
+
+pub fn selected_result(results: &[SearchResult], select: usize) -> Result<Option<&SearchResult>> {
+    if results.is_empty() {
+        return Ok(None);
+    }
+    if select == 0 || select > results.len() {
+        bail!(
+            "--select must be between 1 and {} for the current result set",
+            results.len()
         );
     }
+    Ok(results.get(select - 1))
 }
 
 pub fn doctor(config: &Config) -> Result<()> {
@@ -39,4 +74,8 @@ pub fn doctor(config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn one_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }

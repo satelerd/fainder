@@ -82,6 +82,12 @@ Search only specific providers:
 fainder search "bedrock latency" --provider codex,claude --limit 10
 ```
 
+Search metadata only, matching the TUI scope toggle:
+
+```bash
+fainder search "SmartUp agents" --scope metadata --limit 10
+```
+
 Use regex for alternatives or structured patterns:
 
 ```bash
@@ -92,6 +98,25 @@ Get machine-readable JSON:
 
 ```bash
 fainder search "SmartUp agents" --json --limit 10
+```
+
+Show snippets and recent messages in human-readable output:
+
+```bash
+fainder search "SmartUp agents" --preview --limit 5
+```
+
+Print only the selected resume command:
+
+```bash
+fainder search "SmartUp agents" --command-only --select 1
+```
+
+Copy or open the selected resume command:
+
+```bash
+fainder search "SmartUp agents" --copy --select 1
+fainder search "SmartUp agents" --open --select 1
 ```
 
 The JSON result items contain:
@@ -121,6 +146,7 @@ Example agent workflow:
 fainder doctor
 fainder search "SmartUp agents" --json --limit 8
 fainder search "SmartUp agents" --provider codex --json --limit 5
+fainder search "SmartUp agents" --command-only --select 1
 ```
 
 Do not blindly execute the first result. Prefer reporting the best candidates to the user when confidence is low.
@@ -135,6 +161,11 @@ Default search is word-based and case-insensitive.
 - Use `--regex` only when the query is a real regex or needs alternatives like `SmartUp|bedrock`.
 - Use `--provider codex,claude` to reduce noise and speed up targeted searches.
 - Use `--limit N` to control output volume.
+- Use `--scope all` to include transcript content. This is the default.
+- Use `--scope metadata` to search only title, path, and recent messages.
+- Use `--preview` for text output with snippets and latest messages.
+- Use `--json` for integrations such as Raycast or another agent harness.
+- Use `--select N` with `--command-only`, `--copy`, or `--open` when acting on a specific result.
 
 ## Interactive TUI
 
@@ -156,6 +187,37 @@ TUI controls:
 - `Esc` exits.
 
 The TUI shows waiting/searching state in the `Conversations` title, ranks recent matches higher, and displays project/repo context before the title.
+
+## Raycast Extension
+
+The repository includes a Raycast extension in `raycast/`. It is a UI wrapper around the non-interactive CLI and should call:
+
+```bash
+fainder search "<query>" --json --limit 50 --scope all
+```
+
+Provider and scope filters map to CLI flags:
+
+```bash
+fainder search "<query>" --json --limit 50 --scope metadata --provider claude
+```
+
+Develop locally:
+
+```bash
+cd raycast
+npm install --cache /private/tmp/fainder-npm-cache
+npm run dev
+```
+
+Build locally:
+
+```bash
+cd raycast
+npm run build
+```
+
+Do not duplicate provider parsers in the Raycast code. Keep provider discovery, ranking, snippets, and resume command generation in the Rust CLI, then consume the JSON output.
 
 ## Practical Patterns
 
@@ -190,6 +252,18 @@ fainder search "SmartUp agents" --json --limit 1
 ```
 
 Then inspect the `resume_command` field and decide whether to copy, show, or run it.
+
+Copy the top candidate after inspection:
+
+```bash
+fainder search "SmartUp agents" --copy --select 1
+```
+
+Open the top candidate only when the user wants to resume it:
+
+```bash
+fainder search "SmartUp agents" --open --select 1
+```
 
 ## Safety
 
