@@ -1,4 +1,5 @@
-# Fainder
+<img width="2170" height="725" alt="image" src="https://github.com/user-attachments/assets/bd260efb-8fd5-42e7-9d94-40755bac9171" />
+<br />
 
 Fainder is a terminal app for finding and resuming local AI agent conversations.
 
@@ -9,10 +10,8 @@ then copies or runs the right resume command.
 
 ```bash
 brew install satelerd/tap/fainder
+fainder
 ```
-
-Fainder uses `ripgrep` for fast transcript search. The Homebrew formula installs
-it automatically.
 
 To update an existing install:
 
@@ -60,6 +59,7 @@ fainder doctor
 ## Search Model
 
 - Metadata is read live from native provider files.
+- Uses `ripgrep` for fast transcript search. The Homebrew formula installs it automatically.
 - Full-text search uses live transcript scans and `rg` candidate discovery.
 - OpenCode is read from OpenCode's own SQLite database.
 - Fainder does not require a background service or manual indexing step.
