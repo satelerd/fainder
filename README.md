@@ -1,10 +1,14 @@
 <img width="2170" height="725" alt="image" src="https://github.com/user-attachments/assets/bd260efb-8fd5-42e7-9d94-40755bac9171" />
 <br />
 
+May you and your agents never lose a conversation ever again.
+
 Fainder is a terminal app for finding and resuming local AI agent conversations.
+It is built for humans using the TUI and for agents using the non-interactive
+CLI.
 
 It searches Codex, Claude Code, OpenCode, and Hermes histories from one place,
-then copies or runs the right resume command.
+then returns the right resume command.
 
 ## Install
 
@@ -22,13 +26,15 @@ brew upgrade fainder
 
 ## Quick Start
 
+Humans can open the TUI:
+
 ```bash
 fainder
 ```
 
 Type a query, pick a conversation, then press `Enter` to copy the resume command.
 
-Non-interactive search is also available:
+Agents should usually use non-interactive search:
 
 ```bash
 fainder search SmartUp
@@ -55,6 +61,34 @@ fainder doctor
 - Regex mode lets you use patterns like `SmartUp|bedrock`.
 - Search waits briefly after typing so it does not scan while you are still
   entering a query.
+
+## Agent Usage
+
+For deterministic usage, agents should prefer:
+
+```bash
+fainder doctor
+fainder search "SmartUp agents" --json --limit 10
+fainder search "bedrock latency" --provider codex,claude --json --limit 5
+fainder search "SmartVOC|SmartOrders|multichannel" --regex --json --limit 15
+```
+
+JSON results include `provider`, `id`, `title`, `cwd`, `updated_at`,
+`resume_command`, `score`, `matched_in`, `snippets`, and `latest_messages`.
+
+Do not blindly execute the first `resume_command`. Inspect the candidate first,
+then run or show the command once the intended conversation is clear.
+
+## Skill
+
+Fainder includes a portable agent skill at:
+
+```text
+skills/fainder/SKILL.md
+```
+
+Agent harnesses that support skills can load that file to learn how to install,
+query, parse, and safely use Fainder.
 
 ## Search Model
 

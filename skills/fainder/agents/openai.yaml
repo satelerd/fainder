@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fainder"
+  short_description: "Find and resume local AI agent conversations."
+  default_prompt: "Use Fainder to search local agent conversation history non-interactively, inspect results, and recover the right resume command."
