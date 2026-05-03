@@ -21,6 +21,8 @@ use crate::config::Config;
 use crate::model::{ProviderKind, SearchOptions, SearchResult};
 use crate::search;
 
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(800);
+
 pub fn run(config: Config) -> Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -44,7 +46,8 @@ struct App {
     full_text: bool,
     show_preview: bool,
     preview_scroll: u16,
-    last_search: Instant,
+    search_due: Option<Instant>,
+    searching: bool,
 }
 
 impl App {
@@ -55,18 +58,18 @@ impl App {
             results: Vec::new(),
             selected: 0,
             list_state: ListState::default(),
-            status: "Type to search. Enter copies. P preview. Tab provider. Esc quits.".to_string(),
+            status: "Type a query to search local agent conversations.".to_string(),
             providers: Vec::new(),
             regex: false,
             full_text: true,
             show_preview: false,
             preview_scroll: 0,
-            last_search: Instant::now(),
+            search_due: None,
+            searching: false,
         }
     }
 
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
-        self.search_now();
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(80))? {
@@ -77,7 +80,10 @@ impl App {
                 }
             }
 
-            if self.query.len() >= 2 && self.last_search.elapsed() > Duration::from_millis(300) {
+            if self
+                .search_due
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.search_now();
             }
         }
@@ -108,41 +114,25 @@ impl App {
                         'y' => {
                             self.copy_selected();
                         }
+                        'p' => {
+                            self.toggle_preview();
+                        }
                         _ => {}
-                    }
-                } else if ch.is_ascii_uppercase() {
-                    match ch {
-                        'P' => {
-                            self.show_preview = !self.show_preview;
-                            self.preview_scroll = 0;
-                        }
-                        'R' => {
-                            self.regex = !self.regex;
-                            self.search_now();
-                        }
-                        'F' => {
-                            self.full_text = !self.full_text;
-                            self.search_now();
-                        }
-                        'O' => {
-                            self.open_selected()?;
-                        }
-                        'Y' => {
-                            self.copy_selected();
-                        }
-                        _ => self.query.push(ch),
                     }
                 } else {
                     self.query.push(ch);
-                    self.last_search = Instant::now();
+                    self.schedule_search();
                 }
             }
             KeyCode::Backspace => {
                 self.query.pop();
-                self.last_search = Instant::now();
                 if self.query.is_empty() {
                     self.results.clear();
                     self.selected = 0;
+                    self.search_due = None;
+                    self.status = "Type a query to search local agent conversations.".to_string();
+                } else {
+                    self.schedule_search();
                 }
             }
             KeyCode::Up => self.move_selection(-1),
@@ -162,7 +152,15 @@ impl App {
     }
 
     fn search_now(&mut self) {
-        self.last_search = Instant::now() + Duration::from_secs(3600);
+        self.search_due = None;
+        if self.query.trim().len() < 2 {
+            self.results.clear();
+            self.selected = 0;
+            self.list_state.select(None);
+            self.status = "Type at least two characters.".to_string();
+            return;
+        }
+        self.searching = true;
         let options = SearchOptions {
             query: self.query.clone(),
             providers: self.providers.clone(),
@@ -182,6 +180,25 @@ impl App {
                 self.status = error.to_string();
             }
         }
+        self.searching = false;
+    }
+
+    fn schedule_search(&mut self) {
+        if self.query.trim().len() < 2 {
+            self.search_due = None;
+            self.results.clear();
+            self.selected = 0;
+            self.list_state.select(None);
+            self.status = "Type at least two characters.".to_string();
+            return;
+        }
+        self.search_due = Some(Instant::now() + SEARCH_DEBOUNCE);
+        self.status = "Waiting for typing to pause...".to_string();
+    }
+
+    fn toggle_preview(&mut self) {
+        self.show_preview = !self.show_preview;
+        self.preview_scroll = 0;
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -243,7 +260,7 @@ impl App {
             [ProviderKind::Hermes] => Vec::new(),
             _ => Vec::new(),
         };
-        self.search_now();
+        self.schedule_search();
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -272,10 +289,21 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(",")
         };
+        let marker = if self.searching {
+            "⌕ searching  "
+        } else if self.search_due.is_some() {
+            "⌕ queued  "
+        } else {
+            ""
+        };
         let title = format!(
-            " Fainder  provider:{provider}  mode:{}  content:{} ",
+            " Fainder  {marker}provider:{provider}  mode:{}  scope:{} ",
             if self.regex { "regex" } else { "words" },
-            if self.full_text { "all" } else { "titles" }
+            if self.full_text {
+                "all text"
+            } else {
+                "titles only"
+            }
         );
         let input = Paragraph::new(self.query.as_str())
             .style(Style::default().fg(Color::White))
@@ -302,6 +330,16 @@ impl App {
     }
 
     fn draw_results(&mut self, frame: &mut Frame, area: Rect) {
+        if self.query.trim().is_empty() {
+            self.draw_empty_help(frame, area);
+            return;
+        }
+
+        if self.search_due.is_some() && self.results.is_empty() {
+            self.draw_searching(frame, area);
+            return;
+        }
+
         let items = self
             .results
             .iter()
@@ -340,6 +378,60 @@ impl App {
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
             .highlight_symbol("› ");
         frame.render_stateful_widget(list, area, &mut self.list_state);
+    }
+
+    fn draw_empty_help(&self, frame: &mut Frame, area: Rect) {
+        let lines = vec![
+            Line::from(Span::styled(
+                "Search local agent conversations",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Type a word like imalab, bedrock, shapeup, or a repo/client name."),
+            Line::from("Multiple words are AND-matched: imalab latency finds both words."),
+            Line::from("Ctrl-r switches to regex mode for patterns like imalab|bedrock."),
+            Line::from("Ctrl-f toggles scope: titles only vs all transcript text."),
+            Line::from("Tab cycles providers: all, codex, claude, opencode, hermes."),
+            Line::from("Enter copies the resume command. Ctrl-o opens it directly."),
+            Line::from("Ctrl-p opens preview; PgUp/PgDn scrolls preview text."),
+            Line::from(""),
+            Line::from(Span::styled(
+                "No database. No indexing. Fainder reads provider histories live.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let help = Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            rounded_block()
+                .borders(Borders::ALL)
+                .title(" Conversations ")
+                .border_style(Style::default().fg(Color::Blue)),
+        );
+        frame.render_widget(help, area);
+    }
+
+    fn draw_searching(&self, frame: &mut Frame, area: Rect) {
+        let help = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "⌕ waiting for typing to pause...",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Fainder waits briefly before searching so the machine does not lag while you type.",
+            ),
+        ])
+        .wrap(Wrap { trim: true })
+        .block(
+            rounded_block()
+                .borders(Borders::ALL)
+                .title(" Conversations ")
+                .border_style(Style::default().fg(Color::Blue)),
+        );
+        frame.render_widget(help, area);
     }
 
     fn draw_preview(&self, frame: &mut Frame, area: Rect) {
@@ -404,7 +496,7 @@ impl App {
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
         let help = format!(
-            "{}  |  Enter copy  P preview  O open  Y copy  Tab provider  R regex  F content  Esc quit",
+            "{}  |  Enter copy  Ctrl-p preview  Ctrl-o open  Ctrl-y copy  Tab provider  Ctrl-r regex  Ctrl-f scope  Esc quit",
             self.status
         );
         frame.render_widget(
@@ -417,7 +509,7 @@ impl App {
 fn provider_color(provider: ProviderKind) -> Color {
     match provider {
         ProviderKind::Codex => Color::Cyan,
-        ProviderKind::Claude => Color::LightRed,
+        ProviderKind::Claude => Color::Rgb(255, 136, 0),
         ProviderKind::Opencode => Color::LightGreen,
         ProviderKind::Hermes => Color::LightMagenta,
     }
