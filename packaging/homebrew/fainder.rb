@@ -1,7 +1,7 @@
 class Fainder < Formula
   desc "Live universal finder for local AI agent conversations"
-  homepage "https://github.com/SmartUp-Chile/fainder"
-  url "https://github.com/SmartUp-Chile/fainder/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/satelerd/fainder"
+  url "https://github.com/satelerd/fainder/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
 
