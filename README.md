@@ -38,7 +38,7 @@ Type a query, pick a conversation, then press `Enter` to copy the resume command
 
 ## Raycast
 
-The repo includes a optional Raycast extension that uses the Fainder CLI:
+The repo includes an optional Raycast extension that uses the Fainder CLI:
 
 ```bash
 cd raycast
@@ -50,6 +50,20 @@ Now you can find your conversations from Raycast.
 
 The extension calls `fainder search <query> --json`, lists conversations, and
 lets you copy or open the selected `resume_command`.
+
+For Raycast-only usage, the extension needs to be published to the Raycast
+Store. The extension is prepared for that flow:
+
+```bash
+cd raycast
+npm run build
+npm run publish
+```
+
+Once Raycast approves and publishes it, install it from Raycast Store and run
+`Search Conversations`. Fainder itself is still the local search engine, so the
+extension will prompt you to install it with Homebrew if the `fainder` binary is
+missing.
 
 ## Skill
 

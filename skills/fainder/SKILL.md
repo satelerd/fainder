@@ -217,6 +217,15 @@ cd raycast
 npm run build
 ```
 
+Publish to Raycast Store:
+
+```bash
+cd raycast
+npm run publish
+```
+
+Published Store installs are the only path that lets users install the extension fully from Raycast without running a local development server. The extension still depends on the local `fainder` binary; if it is missing, the Raycast UI should guide the user to run `brew install satelerd/tap/fainder`.
+
 Do not duplicate provider parsers in the Raycast code. Keep provider discovery, ranking, snippets, and resume command generation in the Rust CLI, then consume the JSON output.
 
 ## Practical Patterns

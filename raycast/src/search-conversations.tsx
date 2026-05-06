@@ -37,12 +37,14 @@ export default function Command() {
   const [provider, setProvider] = useState<Provider>("all");
   const [scope, setScope] = useState<Scope>("all");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     const trimmed = query.trim();
     if (trimmed.length < 2) {
       setResults([]);
+      setErrorMessage(null);
       setIsLoading(false);
       return;
     }
@@ -50,9 +52,15 @@ export default function Command() {
     setIsLoading(true);
     const timer = setTimeout(() => {
       searchFainder(trimmed, provider, scope)
-        .then(setResults)
+        .then((nextResults) => {
+          setResults(nextResults);
+          setErrorMessage(null);
+        })
         .catch(async (error) => {
           setResults([]);
+          setErrorMessage(
+            error instanceof Error ? error.message : String(error),
+          );
           await showToast({
             style: Toast.Style.Failure,
             title: "Fainder search failed",
@@ -113,11 +121,19 @@ export default function Command() {
       searchBarPlaceholder="Search local agent conversations..."
       throttle
     >
-      {query.trim().length < 2 ? (
+      {errorMessage ? (
+        <List.EmptyView
+          icon={Icon.Warning}
+          title="Fainder is not ready"
+          description={errorMessage}
+          actions={<SetupActions />}
+        />
+      ) : query.trim().length < 2 ? (
         <List.EmptyView
           icon={Icon.MagnifyingGlass}
           title="Search Fainder"
           description="Type a project, repo, bug, client, or topic."
+          actions={<SetupActions />}
         />
       ) : (
         results.map((result, index) => (
@@ -143,6 +159,27 @@ export default function Command() {
         ))
       )}
     </List>
+  );
+}
+
+function SetupActions() {
+  return (
+    <ActionPanel>
+      <Action
+        title="Install Fainder with Homebrew"
+        icon={Icon.Download}
+        onAction={() => openInTerminal("brew install satelerd/tap/fainder")}
+      />
+      <Action
+        title="Update Fainder with Homebrew"
+        icon={Icon.ArrowClockwise}
+        onAction={() => openInTerminal("brew update && brew upgrade fainder")}
+      />
+      <Action.CopyToClipboard
+        title="Copy Install Command"
+        content="brew install satelerd/tap/fainder"
+      />
+    </ActionPanel>
   );
 }
 
