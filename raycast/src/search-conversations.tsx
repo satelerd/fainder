@@ -10,7 +10,14 @@ import {
 import { execFile } from "node:child_process";
 import { useEffect, useMemo, useState } from "react";
 
-type Provider = "all" | "codex" | "claude" | "opencode" | "hermes";
+type Provider =
+  | "all"
+  | "codex"
+  | "claude"
+  | "opencode"
+  | "hermes"
+  | "cursor"
+  | "copilot";
 type Scope = "all" | "metadata";
 
 type SearchResult = {
@@ -92,14 +99,14 @@ export default function Command() {
           <List.Dropdown.Item title="All - Metadata" value="all:metadata" />
         </List.Dropdown.Section>
         <List.Dropdown.Section title="Providers">
-          {(["codex", "claude", "opencode", "hermes"] as const).map((item) => (
+          {providers().map((item) => (
             <List.Dropdown.Item
               key={item}
               title={`${labelProvider(item)} - Full Text`}
               value={`${item}:all`}
             />
           ))}
-          {(["codex", "claude", "opencode", "hermes"] as const).map((item) => (
+          {providers().map((item) => (
             <List.Dropdown.Item
               key={`${item}-metadata`}
               title={`${labelProvider(item)} - Metadata`}
@@ -317,6 +324,8 @@ function labelProvider(provider: Exclude<Provider, "all">): string {
     claude: "Claude",
     opencode: "OpenCode",
     hermes: "Hermes",
+    cursor: "Cursor",
+    copilot: "Copilot",
   };
   return labels[provider];
 }
@@ -327,8 +336,14 @@ function providerColor(provider: Exclude<Provider, "all">): Color {
     claude: Color.Orange,
     opencode: Color.Green,
     hermes: Color.Purple,
+    cursor: Color.Yellow,
+    copilot: Color.PrimaryText,
   };
   return colors[provider];
+}
+
+function providers(): Exclude<Provider, "all">[] {
+  return ["codex", "claude", "opencode", "hermes", "cursor", "copilot"];
 }
 
 function basename(path: string): string {

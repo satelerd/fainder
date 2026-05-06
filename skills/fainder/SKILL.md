@@ -1,13 +1,13 @@
 ---
 name: fainder
-description: Use Fainder to find, inspect, and resume local AI agent conversations across Codex, Claude Code, OpenCode, and Hermes. Use when an agent needs to recover prior work, locate a lost thread, search conversation history, identify the right resume command, audit available local providers, or guide a human through Fainder installation and usage from the terminal or non-interactive CLI.
+description: Use Fainder to find, inspect, and resume local AI agent conversations across Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot. Use when an agent needs to recover prior work, locate a lost thread, search conversation history, identify the right resume command, audit available local providers, or guide a human through Fainder installation and usage from the terminal or non-interactive CLI.
 ---
 
 # Fainder
 
 ## Purpose
 
-Fainder is a local conversation finder for humans and agents. It searches local AI agent histories from multiple providers and returns the command needed to resume the selected conversation.
+Fainder is a local conversation finder for humans and agents. It searches local AI agent histories from multiple providers and returns the command needed to resume or reopen the selected conversation/workspace.
 
 Use Fainder when the task depends on prior local agent context and the user does not remember which tool or conversation contains it.
 
@@ -43,6 +43,8 @@ Fainder currently supports:
 - `claude`: default path `~/.claude`; aliases accepted by CLI config/parser include `claude-code` and `cloud-code`
 - `opencode`: default path `~/.local/share/opencode/opencode.db`
 - `hermes`: default path `~/.hermes/sessions`
+- `cursor`: default path `~/Library/Application Support/Cursor/User/workspaceStorage`
+- `copilot`: default path `~/Library/Application Support/Code/User/workspaceStorage`
 
 Check which providers exist locally:
 
@@ -58,6 +60,8 @@ codex = "~/.codex"
 claude = "~/.claude"
 opencode = "~/.local/share/opencode/opencode.db"
 hermes = "~/.hermes/sessions"
+cursor = "~/Library/Application Support/Cursor/User/workspaceStorage"
+copilot = "~/Library/Application Support/Code/User/workspaceStorage"
 ```
 
 ## Agent-First Usage
@@ -227,6 +231,16 @@ npm run publish
 Published Store installs are the only path that lets users install the extension fully from Raycast without running a local development server. The extension still depends on the local `fainder` binary; if it is missing, the Raycast UI should guide the user to run `brew install satelerd/tap/fainder`.
 
 Do not duplicate provider parsers in the Raycast code. Keep provider discovery, ranking, snippets, and resume command generation in the Rust CLI, then consume the JSON output.
+
+## Release Automation
+
+Use the repo release script for Homebrew releases:
+
+```bash
+scripts/release.sh 0.1.3
+```
+
+It requires a clean working tree. It bumps Cargo metadata, validates Rust, creates and pushes the git tag, computes the GitHub tarball SHA, updates `packaging/homebrew/fainder.rb`, and updates `satelerd/homebrew-tap`.
 
 ## Practical Patterns
 

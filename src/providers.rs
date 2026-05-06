@@ -20,6 +20,8 @@ pub fn sessions(config: &Config, provider: ProviderKind) -> Result<Vec<Session>>
         ProviderKind::Claude => claude_sessions(&config.path(provider)),
         ProviderKind::Opencode => opencode_sessions(&config.path(provider)),
         ProviderKind::Hermes => hermes_sessions(&config.path(provider)),
+        ProviderKind::Cursor => vscode_style_sessions(&config.path(provider), provider, "cursor"),
+        ProviderKind::Copilot => vscode_style_sessions(&config.path(provider), provider, "code"),
     }
 }
 
@@ -64,6 +66,9 @@ pub fn content_sessions(
             limit,
             hermes_session_from_transcript,
         ),
+        ProviderKind::Cursor | ProviderKind::Copilot => {
+            vscode_style_content_sessions(config, provider, matcher, limit)
+        }
     }
 }
 
@@ -402,6 +407,279 @@ fn hermes_session_from_transcript(path: &Path) -> Result<Option<Session>> {
     }))
 }
 
+fn vscode_style_sessions(
+    root: &Path,
+    provider: ProviderKind,
+    open_command: &str,
+) -> Result<Vec<Session>> {
+    let mut sessions = Vec::new();
+    if !root.exists() {
+        return Ok(sessions);
+    }
+
+    for db_path in WalkDir::new(root)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|e| e.into_path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some("state.vscdb"))
+    {
+        let workspace_dir = db_path.parent().unwrap_or(root);
+        let cwd = workspace_path(workspace_dir);
+        let mut workspace_sessions =
+            vscode_sessions_from_db(&db_path, provider, open_command, cwd)?;
+        sessions.append(&mut workspace_sessions);
+    }
+
+    Ok(sessions)
+}
+
+fn vscode_style_content_sessions(
+    config: &Config,
+    provider: ProviderKind,
+    matcher: &Matcher,
+    limit: usize,
+) -> Result<Vec<(Session, Vec<String>)>> {
+    let open_command = match provider {
+        ProviderKind::Cursor => "cursor",
+        ProviderKind::Copilot => "code",
+        _ => return Ok(Vec::new()),
+    };
+    let mut results = Vec::new();
+    for session in vscode_style_sessions(&config.path(provider), provider, open_command)? {
+        let snippets = vscode_content_snippets(&session, matcher, 3)?;
+        if !snippets.is_empty() {
+            results.push((session, snippets));
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn vscode_sessions_from_db(
+    db_path: &Path,
+    provider: ProviderKind,
+    open_command: &str,
+    cwd: Option<PathBuf>,
+) -> Result<Vec<Session>> {
+    let conn = Connection::open(db_path)?;
+    let Ok(mut stmt) = conn.prepare(
+        "select key, cast(value as text) from ItemTable \
+         where key in ('composer.composerData', 'aiService.prompts', 'aiService.generations') \
+            or key like '%chat%' \
+            or key like '%copilot%' \
+            or key like '%composer%'",
+    ) else {
+        return Ok(Vec::new());
+    };
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut composer_data = None;
+    let mut prompts = Vec::new();
+    let mut generations = Vec::new();
+    let mut fallback_text = Vec::new();
+
+    for row in rows.filter_map(|row| row.ok()) {
+        let (key, value) = row;
+        if key == "composer.composerData" {
+            composer_data = serde_json::from_str::<Value>(&value).ok();
+        } else if key == "aiService.prompts" {
+            prompts = serde_json::from_str::<Vec<Value>>(&value).unwrap_or_default();
+        } else if key == "aiService.generations" {
+            generations = serde_json::from_str::<Vec<Value>>(&value).unwrap_or_default();
+        } else {
+            let text = searchable_line_text(&value);
+            if !text.trim().is_empty() {
+                fallback_text.push(text);
+            }
+        }
+    }
+
+    let mut sessions = Vec::new();
+    if let Some(value) = composer_data {
+        if let Some(composers) = value.get("allComposers").and_then(Value::as_array) {
+            for composer in composers {
+                let Some(id) = string_field(composer, "composerId") else {
+                    continue;
+                };
+                let title = string_field(composer, "name")
+                    .or_else(|| {
+                        composer
+                            .get("authoredPlan")
+                            .and_then(|plan| string_field(plan, "title"))
+                    })
+                    .or_else(|| first_prompt_for_composer(&prompts, &id))
+                    .unwrap_or_else(|| id.clone());
+                let mut latest = Vec::new();
+                if let Some(prompt) = first_prompt_for_composer(&prompts, &id) {
+                    push_latest(&mut latest, prompt);
+                }
+                if let Some(generation) = first_generation_for_composer(&generations, &id) {
+                    push_latest(&mut latest, generation);
+                }
+                let created_at = int_field(composer, "createdAt").and_then(millis);
+                let updated_at = int_field(composer, "lastUpdatedAt")
+                    .and_then(millis)
+                    .or_else(|| {
+                        fs::metadata(db_path)
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .map(DateTime::<Utc>::from)
+                    });
+                sessions.push(vscode_session(
+                    provider,
+                    id,
+                    title,
+                    cwd.clone(),
+                    created_at,
+                    updated_at,
+                    db_path,
+                    open_command,
+                    latest,
+                ));
+            }
+        }
+    }
+
+    if sessions.is_empty()
+        && (!prompts.is_empty() || !generations.is_empty() || !fallback_text.is_empty())
+    {
+        let id = db_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("workspace")
+            .to_string();
+        let title = prompts
+            .first()
+            .and_then(|value| string_field(value, "text"))
+            .or_else(|| {
+                generations
+                    .first()
+                    .and_then(|value| string_field(value, "textDescription"))
+            })
+            .or_else(|| fallback_text.first().cloned())
+            .map(|text| short_title(&text))
+            .unwrap_or_else(|| id.clone());
+        let mut latest = Vec::new();
+        for value in prompts.iter().take(3) {
+            if let Some(text) = string_field(value, "text") {
+                push_latest(&mut latest, text);
+            }
+        }
+        sessions.push(vscode_session(
+            provider,
+            id,
+            title,
+            cwd,
+            None,
+            fs::metadata(db_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(DateTime::<Utc>::from),
+            db_path,
+            open_command,
+            latest,
+        ));
+    }
+
+    Ok(sessions)
+}
+
+fn vscode_session(
+    provider: ProviderKind,
+    id: String,
+    title: String,
+    cwd: Option<PathBuf>,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+    db_path: &Path,
+    open_command: &str,
+    latest_messages: Vec<String>,
+) -> Session {
+    let resume_command = if let Some(cwd) = &cwd {
+        format!("{} {}", open_command, shell_path(cwd))
+    } else {
+        open_command.to_string()
+    };
+    Session {
+        provider,
+        id,
+        title: short_title(&title),
+        cwd,
+        created_at,
+        updated_at,
+        source_path: Some(db_path.to_path_buf()),
+        transcript_path: Some(db_path.to_path_buf()),
+        resume_command,
+        latest_messages,
+    }
+}
+
+fn vscode_content_snippets(
+    session: &Session,
+    matcher: &Matcher,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let Some(path) = &session.source_path else {
+        return Ok(Vec::new());
+    };
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare("select cast(value as text) from ItemTable")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut snippets = Vec::new();
+    for row in rows.filter_map(|row| row.ok()) {
+        for text in json_text_chunks(&row) {
+            if matcher.is_match(&text) {
+                snippets.push(highlightless_snippet(&text, ""));
+                if snippets.len() >= limit {
+                    return Ok(snippets);
+                }
+            }
+        }
+    }
+    Ok(snippets)
+}
+
+fn workspace_path(workspace_dir: &Path) -> Option<PathBuf> {
+    let raw = fs::read_to_string(workspace_dir.join("workspace.json")).ok()?;
+    let value = serde_json::from_str::<Value>(&raw).ok()?;
+    let uri = string_field(&value, "folder")
+        .or_else(|| string_field(&value, "workspace"))
+        .or_else(|| string_field(&value, "configuration"))?;
+    file_uri_to_path(&uri)
+}
+
+fn file_uri_to_path(value: &str) -> Option<PathBuf> {
+    if let Some(path) = value.strip_prefix("file://") {
+        Some(PathBuf::from(percent_decode(path)))
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                output.push(hex);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
 fn file_content_sessions<F>(
     root: &Path,
     matcher: &Matcher,
@@ -586,6 +864,32 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(str::to_string)
 }
 
+fn int_field(value: &Value, key: &str) -> Option<i64> {
+    value.get(key)?.as_i64()
+}
+
+fn first_prompt_for_composer(values: &[Value], composer_id: &str) -> Option<String> {
+    values
+        .iter()
+        .find(|value| string_field(value, "composerId").as_deref() == Some(composer_id))
+        .or_else(|| values.first())
+        .and_then(|value| string_field(value, "text"))
+        .map(|text| short_title(&text))
+}
+
+fn first_generation_for_composer(values: &[Value], composer_id: &str) -> Option<String> {
+    values
+        .iter()
+        .find(|value| string_field(value, "composerId").as_deref() == Some(composer_id))
+        .or_else(|| values.first())
+        .and_then(|value| {
+            string_field(value, "textDescription")
+                .or_else(|| string_field(value, "text"))
+                .or_else(|| string_field(value, "response"))
+        })
+        .map(|text| short_title(&text))
+}
+
 fn text_from_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -612,6 +916,52 @@ fn text_from_value(value: &Value) -> String {
                     .join(" ")
             }),
         _ => String::new(),
+    }
+}
+
+fn json_text_chunks(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return vec![searchable_line_text(raw)];
+    };
+    let mut chunks = Vec::new();
+    collect_json_text(&value, &mut chunks);
+    chunks
+}
+
+fn collect_json_text(value: &Value, chunks: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            if text.split_whitespace().count() >= 2 {
+                chunks.push(text.clone());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_json_text(item, chunks);
+            }
+        }
+        Value::Object(map) => {
+            for key in [
+                "text",
+                "textDescription",
+                "response",
+                "message",
+                "content",
+                "name",
+                "title",
+                "description",
+            ] {
+                if let Some(value) = map.get(key) {
+                    collect_json_text(value, chunks);
+                }
+            }
+            if chunks.len() < 64 {
+                for value in map.values().take(16) {
+                    collect_json_text(value, chunks);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

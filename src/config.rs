@@ -29,6 +29,14 @@ impl Config {
             home.join(".local/share/opencode/opencode.db"),
         );
         paths.insert(ProviderKind::Hermes, home.join(".hermes/sessions"));
+        paths.insert(
+            ProviderKind::Cursor,
+            home.join("Library/Application Support/Cursor/User/workspaceStorage"),
+        );
+        paths.insert(
+            ProviderKind::Copilot,
+            home.join("Library/Application Support/Code/User/workspaceStorage"),
+        );
 
         let config_path = dirs::config_dir()
             .unwrap_or_else(|| home.join(".config"))

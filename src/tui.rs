@@ -293,7 +293,9 @@ impl App {
             [ProviderKind::Codex] => vec![ProviderKind::Claude],
             [ProviderKind::Claude] => vec![ProviderKind::Opencode],
             [ProviderKind::Opencode] => vec![ProviderKind::Hermes],
-            [ProviderKind::Hermes] => Vec::new(),
+            [ProviderKind::Hermes] => vec![ProviderKind::Cursor],
+            [ProviderKind::Cursor] => vec![ProviderKind::Copilot],
+            [ProviderKind::Copilot] => Vec::new(),
             _ => Vec::new(),
         };
         self.schedule_search();
@@ -581,6 +583,8 @@ fn provider_color(provider: ProviderKind) -> Color {
         ProviderKind::Claude => Color::Rgb(255, 136, 0),
         ProviderKind::Opencode => Color::LightGreen,
         ProviderKind::Hermes => Color::LightMagenta,
+        ProviderKind::Cursor => Color::LightYellow,
+        ProviderKind::Copilot => Color::LightBlue,
     }
 }
 

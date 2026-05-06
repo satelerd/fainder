@@ -13,11 +13,20 @@ pub enum ProviderKind {
     Claude,
     Opencode,
     Hermes,
+    Cursor,
+    Copilot,
 }
 
 impl ProviderKind {
     pub fn all() -> Vec<Self> {
-        vec![Self::Codex, Self::Claude, Self::Opencode, Self::Hermes]
+        vec![
+            Self::Codex,
+            Self::Claude,
+            Self::Opencode,
+            Self::Hermes,
+            Self::Cursor,
+            Self::Copilot,
+        ]
     }
 
     pub fn label(self) -> &'static str {
@@ -26,6 +35,8 @@ impl ProviderKind {
             Self::Claude => "claude",
             Self::Opencode => "opencode",
             Self::Hermes => "hermes",
+            Self::Cursor => "cursor",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -45,6 +56,8 @@ impl FromStr for ProviderKind {
             "claude" | "claude-code" | "cloud-code" => Ok(Self::Claude),
             "opencode" | "open-code" => Ok(Self::Opencode),
             "hermes" => Ok(Self::Hermes),
+            "cursor" => Ok(Self::Cursor),
+            "copilot" | "github-copilot" | "vscode-copilot" => Ok(Self::Copilot),
             _ => Err(anyhow!("unknown provider: {value}")),
         }
     }

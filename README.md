@@ -6,8 +6,8 @@
 
 Fainder is a tiny, local and read-only terminal app for finding and resuming your conversations.
 
-It searches Codex, Claude Code, OpenCode, and Hermes histories from one place,
-then returns the right resume command.
+It searches Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot
+histories from one place, then returns the right resume command.
 
 ## Install
 
@@ -91,6 +91,8 @@ query, parse, and safely use Fainder.
 - Uses `ripgrep` for fast transcript search. The Homebrew formula installs it automatically.
 - Full-text search uses live transcript scans and `rg` candidate discovery.
 - OpenCode is read from OpenCode's own SQLite database.
+- Cursor and GitHub Copilot are read from VS Code-style `workspaceStorage`
+  SQLite databases.
 - Fainder does not require a background service or manual indexing step.
 
 
@@ -100,4 +102,13 @@ query, parse, and safely use Fainder.
 cargo test
 cargo run
 cargo run -- search SmartUp --limit 5
+```
+
+## Release
+
+Release automation updates Cargo metadata, tags the repo, computes the Homebrew
+tarball SHA, updates the formula, and pushes the tap:
+
+```bash
+scripts/release.sh 0.1.3
 ```
