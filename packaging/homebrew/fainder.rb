@@ -1,8 +1,8 @@
 class Fainder < Formula
   desc "Live universal finder for local AI agent conversations"
   homepage "https://github.com/satelerd/fainder"
-  url "https://github.com/satelerd/fainder/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "2033e539ecc2c4605cf67d173e607ded4fa3175bdb2748122466c469cdaad265"
+  url "https://github.com/satelerd/fainder/archive/refs/tags/v0.1.2.tar.gz"
+  sha256 "REPLACE_WITH_RELEASE_SHA256"
   license "MIT"
 
   depends_on "rust" => :build
