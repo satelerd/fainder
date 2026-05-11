@@ -110,6 +110,7 @@ fn codex_sessions(root: &Path) -> Result<Vec<Session>> {
                 cwd: None,
                 created_at: None,
                 updated_at,
+                message_count: None,
                 source_path: Some(index.clone()),
                 transcript_path: None,
                 resume_command: format!("codex resume {}", shell(&id)),
@@ -132,6 +133,7 @@ fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
         .ok()
         .and_then(|m| m.modified().ok())
         .map(DateTime::<Utc>::from);
+    let mut message_count = 0usize;
     let mut latest = Vec::new();
 
     for line in reader.lines().map_while(|line| line.ok()).take(140) {
@@ -151,12 +153,15 @@ fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
         if value.get("type").and_then(Value::as_str) == Some("event_msg") {
             if let Some(payload) = value.get("payload") {
                 if let Some(message) = string_field(payload, "message") {
-                    if title.is_none()
-                        && payload.get("type").and_then(Value::as_str) == Some("user_message")
-                    {
+                    message_count += 1;
+                    let is_user_message =
+                        payload.get("type").and_then(Value::as_str) == Some("user_message");
+                    if title.is_none() && is_user_message {
                         title = Some(short_title(&message));
                     }
-                    push_latest(&mut latest, message);
+                    if is_user_message {
+                        push_latest(&mut latest, message);
+                    }
                 }
             }
         }
@@ -180,6 +185,7 @@ fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
         cwd,
         created_at,
         updated_at,
+        message_count: Some(message_count),
         source_path: Some(path.to_path_buf()),
         transcript_path: Some(path.to_path_buf()),
         resume_command,
@@ -230,6 +236,7 @@ fn claude_sessions(root: &Path) -> Result<Vec<Session>> {
                 cwd,
                 created_at: parse_time(string_field(&entry, "created").as_deref()),
                 updated_at: parse_time(string_field(&entry, "modified").as_deref()),
+                message_count: int_field(&entry, "messageCount").map(|count| count as usize),
                 source_path: Some(path.clone()),
                 transcript_path,
                 resume_command,
@@ -249,6 +256,7 @@ fn claude_session_from_transcript(path: &Path, id: String) -> Result<Option<Sess
         .ok()
         .and_then(|m| m.modified().ok())
         .map(DateTime::<Utc>::from);
+    let mut message_count = 0usize;
     let mut latest = Vec::new();
 
     let file = File::open(path)?;
@@ -262,12 +270,16 @@ fn claude_session_from_transcript(path: &Path, id: String) -> Result<Option<Sess
             created_at.get_or_insert(ts);
         }
         cwd = string_field(&value, "cwd").map(PathBuf::from).or(cwd);
-        if value.get("type").and_then(Value::as_str) == Some("user") {
+        let message_type = value.get("type").and_then(Value::as_str);
+        if matches!(message_type, Some("user") | Some("assistant")) {
             if let Some(message) = value.get("message") {
                 let text = text_from_value(message.get("content").unwrap_or(message));
                 if !text.is_empty() {
+                    message_count += 1;
                     title.get_or_insert_with(|| short_title(&text));
-                    push_latest(&mut latest, text);
+                    if message_type == Some("user") {
+                        push_latest(&mut latest, text);
+                    }
                 }
             }
         }
@@ -286,6 +298,7 @@ fn claude_session_from_transcript(path: &Path, id: String) -> Result<Option<Sess
         cwd,
         created_at,
         updated_at,
+        message_count: Some(message_count),
         source_path: Some(path.to_path_buf()),
         transcript_path: Some(path.to_path_buf()),
         resume_command,
@@ -315,6 +328,7 @@ fn opencode_sessions(db_path: &Path) -> Result<Vec<Session>> {
             cwd: Some(cwd.clone()),
             created_at: millis(created),
             updated_at: millis(updated),
+            message_count: count_parts_for_session(db_path, &id).ok(),
             source_path: Some(db_path.to_path_buf()),
             transcript_path: Some(db_path.to_path_buf()),
             resume_command: format!(
@@ -365,6 +379,7 @@ fn hermes_sessions(root: &Path) -> Result<Vec<Session>> {
             cwd: None,
             created_at: parse_time(string_field(&value, "session_start").as_deref()),
             updated_at: parse_time(string_field(&value, "last_updated").as_deref()),
+            message_count: jsonl_message_count(&jsonl).ok(),
             source_path: Some(path),
             transcript_path: jsonl.exists().then_some(jsonl),
             resume_command: format!("hermes --resume {}", shell(&id)),
@@ -400,6 +415,7 @@ fn hermes_session_from_transcript(path: &Path) -> Result<Option<Session>> {
             .ok()
             .and_then(|m| m.modified().ok())
             .map(DateTime::<Utc>::from),
+        message_count: jsonl_message_count(path).ok(),
         source_path: Some(path.to_path_buf()),
         transcript_path: Some(path.to_path_buf()),
         resume_command: format!("hermes --resume {}", shell(&id)),
@@ -518,9 +534,6 @@ fn vscode_sessions_from_db(
                 if let Some(prompt) = first_prompt_for_composer(&prompts, &id) {
                     push_latest(&mut latest, prompt);
                 }
-                if let Some(generation) = first_generation_for_composer(&generations, &id) {
-                    push_latest(&mut latest, generation);
-                }
                 let created_at = int_field(composer, "createdAt").and_then(millis);
                 let updated_at = int_field(composer, "lastUpdatedAt")
                     .and_then(millis)
@@ -530,6 +543,7 @@ fn vscode_sessions_from_db(
                             .and_then(|m| m.modified().ok())
                             .map(DateTime::<Utc>::from)
                     });
+                let message_count = composer_message_count(&prompts, &generations, &id);
                 sessions.push(vscode_session(
                     provider,
                     id,
@@ -537,6 +551,7 @@ fn vscode_sessions_from_db(
                     cwd.clone(),
                     created_at,
                     updated_at,
+                    message_count,
                     db_path,
                     open_command,
                     latest,
@@ -581,6 +596,7 @@ fn vscode_sessions_from_db(
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .map(DateTime::<Utc>::from),
+            Some(prompts.len().max(generations.len())),
             db_path,
             open_command,
             latest,
@@ -597,6 +613,7 @@ fn vscode_session(
     cwd: Option<PathBuf>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
+    message_count: Option<usize>,
     db_path: &Path,
     open_command: &str,
     latest_messages: Vec<String>,
@@ -613,6 +630,7 @@ fn vscode_session(
         cwd,
         created_at,
         updated_at,
+        message_count,
         source_path: Some(db_path.to_path_buf()),
         transcript_path: Some(db_path.to_path_buf()),
         resume_command,
@@ -819,6 +837,52 @@ fn opencode_content_snippets(
     Ok(snippets)
 }
 
+fn count_parts_for_session(db_path: &Path, session_id: &str) -> Result<usize> {
+    let conn = Connection::open(db_path)?;
+    let mut stmt = conn.prepare("select count(*) from part where session_id = ?")?;
+    let count: i64 = stmt.query_row([session_id], |row| row.get(0))?;
+    Ok(count.max(0) as usize)
+}
+
+fn jsonl_message_count(path: &Path) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut count = 0usize;
+    for line in reader.lines().map_while(|line| line.ok()) {
+        let text = searchable_line_text(&line);
+        if !text.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn composer_message_count(
+    prompts: &[Value],
+    generations: &[Value],
+    composer_id: &str,
+) -> Option<usize> {
+    let prompt_count = prompts
+        .iter()
+        .filter(|value| {
+            string_field(value, "composerId").is_none()
+                || string_field(value, "composerId").as_deref() == Some(composer_id)
+        })
+        .count();
+    let generation_count = generations
+        .iter()
+        .filter(|value| {
+            string_field(value, "composerId").is_none()
+                || string_field(value, "composerId").as_deref() == Some(composer_id)
+        })
+        .count();
+    let total = prompt_count + generation_count;
+    (total > 0).then_some(total)
+}
+
 fn read_jsonl(path: &Path) -> Result<Vec<Value>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -874,19 +938,6 @@ fn first_prompt_for_composer(values: &[Value], composer_id: &str) -> Option<Stri
         .find(|value| string_field(value, "composerId").as_deref() == Some(composer_id))
         .or_else(|| values.first())
         .and_then(|value| string_field(value, "text"))
-        .map(|text| short_title(&text))
-}
-
-fn first_generation_for_composer(values: &[Value], composer_id: &str) -> Option<String> {
-    values
-        .iter()
-        .find(|value| string_field(value, "composerId").as_deref() == Some(composer_id))
-        .or_else(|| values.first())
-        .and_then(|value| {
-            string_field(value, "textDescription")
-                .or_else(|| string_field(value, "text"))
-                .or_else(|| string_field(value, "response"))
-        })
         .map(|text| short_title(&text))
 }
 

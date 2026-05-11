@@ -103,7 +103,9 @@ fn upsert_result(
         id: session.id,
         title: session.title,
         cwd: session.cwd,
+        created_at: session.created_at,
         updated_at: session.updated_at,
+        message_count: session.message_count,
         resume_command: session.resume_command,
         score,
         matched_in,
@@ -117,6 +119,15 @@ fn upsert_result(
             if existing.cwd.is_none() && result.cwd.is_some() {
                 existing.cwd = result.cwd;
                 existing.resume_command = result.resume_command;
+            }
+            if existing.created_at.is_none() && result.created_at.is_some() {
+                existing.created_at = result.created_at;
+            }
+            if existing.updated_at.is_none() && result.updated_at.is_some() {
+                existing.updated_at = result.updated_at;
+            }
+            if existing.message_count.is_none() && result.message_count.is_some() {
+                existing.message_count = result.message_count;
             }
             for part in result.matched_in.split(',') {
                 if !part.is_empty() && !existing.matched_in.split(',').any(|p| p == part) {

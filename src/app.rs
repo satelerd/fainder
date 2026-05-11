@@ -15,13 +15,24 @@ pub fn print_results(results: &[SearchResult], preview: bool) {
             .updated_at
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "-".to_string());
+        let created = result
+            .created_at
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let messages = result
+            .message_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{}. [{}] {}  {}  {}\n  matched: {}  score: {}\n  command: {}\n",
+            "{}. [{}] {}  {}  {}\n  messages: {}  created: {}  last: {}\n  matched: {}  score: {}\n  command: {}\n",
             index + 1,
             result.provider,
             updated,
             result.title,
             cwd,
+            messages,
+            created,
+            updated,
             result.matched_in,
             result.score,
             result.resume_command

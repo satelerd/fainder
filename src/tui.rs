@@ -375,28 +375,42 @@ impl App {
             .results
             .iter()
             .map(|result| {
-                let updated = format_relative_time(result.updated_at);
+                let started = format_started_time(result.created_at);
+                let updated = format_last_used_time(result.updated_at);
                 let cwd = result
                     .cwd
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .and_then(|p| p.to_str())
                     .unwrap_or("-");
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{:<8}", result.provider.label()),
-                        Style::default()
-                            .fg(provider_color(result.provider))
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("{updated}  "), Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        format!("{:<18}", truncate(cwd, 18)),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::raw("  "),
-                    Span::raw(result.title.clone()),
-                ]))
+                let messages = result
+                    .message_count
+                    .map(|count| format!("{count} msgs"))
+                    .unwrap_or_else(|| "-- msgs".to_string());
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{:<8}", result.provider.label()),
+                            Style::default()
+                                .fg(provider_color(result.provider))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{:<18}", truncate(cwd, 18)),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw("  "),
+                        Span::raw(result.title.clone()),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(messages, Style::default().fg(Color::DarkGray)),
+                        Span::styled("  started ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(started, Style::default().fg(Color::Gray)),
+                        Span::styled("  last ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(updated, Style::default().fg(Color::Gray)),
+                    ]),
+                ])
             })
             .collect::<Vec<_>>();
         let list = List::new(items)
@@ -426,7 +440,7 @@ impl App {
                 Span::styled(", client, or topic.", Style::default().fg(Color::Gray)),
             ]),
             Line::from(Span::styled(
-                "Fainder looks across local Codex, Claude Code, OpenCode, and Hermes histories.",
+                "Fainder reads local Codex, Claude Code, OpenCode, Hermes, Cursor, and Copilot histories.",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
@@ -524,12 +538,13 @@ impl App {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Latest",
+                "Recent User Messages",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )));
-            for message in &result.latest_messages {
+            let latest_start = result.latest_messages.len().saturating_sub(3);
+            for message in &result.latest_messages[latest_start..] {
                 lines.push(Line::from(message.clone()));
             }
             lines
@@ -609,7 +624,26 @@ fn truncate(value: &str, max: usize) -> String {
     )
 }
 
-fn format_relative_time(value: Option<DateTime<Utc>>) -> String {
+fn format_started_time(value: Option<DateTime<Utc>>) -> String {
+    let Some(value) = value else {
+        return "--".to_string();
+    };
+    let now = Utc::now();
+    let age = now.signed_duration_since(value);
+    if age.num_hours() < 24 {
+        value.format("%H:%M").to_string()
+    } else if age.num_days() == 1 {
+        "yesterday".to_string()
+    } else if age.num_days() < 7 {
+        format!("{}d ago", age.num_days())
+    } else if value.year() == now.year() {
+        value.format("%b %-d").to_string()
+    } else {
+        value.format("%Y-%m-%d").to_string()
+    }
+}
+
+fn format_last_used_time(value: Option<DateTime<Utc>>) -> String {
     let Some(value) = value else {
         return "--".to_string();
     };
