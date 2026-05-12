@@ -111,3 +111,42 @@ pub struct ProviderReport {
     pub sessions: usize,
     pub warnings: Vec<String>,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TranscriptRole {
+    User,
+    Agent,
+    Tool,
+    System,
+    Unknown,
+}
+
+impl TranscriptRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Tool => "tool",
+            Self::System => "system",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TranscriptTurn {
+    pub turn: usize,
+    pub role: TranscriptRole,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub text: String,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<String>,
+    pub tool_result: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Transcript {
+    pub session: Session,
+    pub turns: Vec<TranscriptTurn>,
+}

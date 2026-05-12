@@ -1,58 +1,165 @@
 ---
 name: fainder
-description: Use Fainder to find, inspect, and resume local AI agent conversations across Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot. Use when an agent needs to recover prior work, locate a lost thread, search conversation history, identify the right resume command, audit available local providers, or guide a human through Fainder installation and usage from the terminal or non-interactive CLI.
+description: Use Fainder to search, inspect, and contextualize local AI agent conversations across Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot. Trigger when an agent needs to recover prior work, find a lost thread, inspect a transcript by role or turn, produce bounded chronological context from another harness, locate resume commands, or guide installation/update with Homebrew.
 ---
 
 # Fainder
 
-## Purpose
+Fainder is a local, read-only conversation finder for humans and agents. Prefer the non-interactive CLI when you are an agent.
 
-Fainder is a local conversation finder for humans and agents. It searches local AI agent histories from multiple providers and returns the command needed to resume or reopen the selected conversation/workspace.
-
-Use Fainder when the task depends on prior local agent context and the user does not remember which tool or conversation contains it.
-
-## Install And Update
-
-Install with Homebrew:
+## Install
 
 ```bash
 brew install satelerd/tap/fainder
-```
-
-Update an existing install:
-
-```bash
-brew update
-brew upgrade fainder
-```
-
-Verify the install:
-
-```bash
-fainder --help
+brew update && brew upgrade fainder
 fainder doctor
 ```
 
-Fainder uses `ripgrep` for fast transcript search. The Homebrew formula installs it automatically.
+Supported providers:
 
-## Providers
+- `codex`
+- `claude`
+- `opencode`
+- `hermes`
+- `cursor`
+- `copilot`
 
-Fainder currently supports:
+## Agent Workflow
 
-- `codex`: default path `~/.codex`
-- `claude`: default path `~/.claude`; aliases accepted by CLI config/parser include `claude-code` and `cloud-code`
-- `opencode`: default path `~/.local/share/opencode/opencode.db`
-- `hermes`: default path `~/.hermes/sessions`
-- `cursor`: default path `~/Library/Application Support/Cursor/User/workspaceStorage`
-- `copilot`: default path `~/Library/Application Support/Code/User/workspaceStorage`
+Use this sequence:
 
-Check which providers exist locally:
+1. `fainder doctor` to confirm local histories.
+2. `fainder search` to find candidate conversations.
+3. `fainder inspect` to locate the relevant turn range inside the chosen conversation.
+4. `fainder context` to print a bounded chronological transcript window.
+5. Continue in the current harness using that evidence. Do not run a provider-native `resume_command` unless the user wants to reopen that provider.
+
+## Search
+
+Find candidate conversations:
 
 ```bash
-fainder doctor
+fainder search "SmartUp migration" --json --limit 8
+fainder search "batch-download Williams" --provider codex,claude --json --limit 10
+fainder search "PR|commit|deploy" --regex --json --limit 10
+fainder search "SmartUp agents" --scope metadata --json --limit 10
 ```
 
-Override paths with `~/.config/fainder/config.toml`:
+Important JSON fields:
+
+- `provider`
+- `id`
+- `title`
+- `cwd`
+- `created_at`
+- `updated_at`
+- `message_count`
+- `resume_command`
+- `snippets`
+- `latest_messages`
+
+If confidence is low, show the best candidates to the user instead of guessing.
+
+## Inspect
+
+Use `inspect` to navigate one conversation without printing the whole transcript.
+
+List human/user turns first when reconstructing intent:
+
+```bash
+fainder inspect claude:cab15fb3 --role user --limit 40
+```
+
+Check where the agent stopped:
+
+```bash
+fainder inspect claude:cab15fb3 --role agent --tail 20
+```
+
+Search inside one conversation:
+
+```bash
+fainder inspect claude:cab15fb3 --find "PR|commit|batch-download|documents.append" --regex
+fainder inspect codex:019dec17 --find "Raycast Homebrew skill"
+```
+
+Read around a relevant turn:
+
+```bash
+fainder inspect claude:cab15fb3 --around 96 --context 8
+fainder inspect claude:cab15fb3 --turn 96 --context 8 --expand
+```
+
+Use JSON for automation:
+
+```bash
+fainder inspect claude:cab15fb3 --find "PR|commit" --regex --json
+```
+
+`inspect` output uses stable turn numbers. Feed those turn numbers into `context`.
+
+## Context
+
+Use `context` after `inspect` identifies a useful range. It is deterministic: it does not call an LLM, does not start Codex or Claude, and does not summarize. It prints local transcript evidence in chronological order:
+
+```bash
+fainder context claude:cab15fb3 --from-turn 90 --to-turn 130
+fainder context claude:cab15fb3 --around 96 --context 12
+fainder context codex:019dec17 --tail 80 --truncate-tools
+```
+
+The default output is Markdown with:
+
+- source metadata
+- token budget estimate
+- chronological transcript turns
+- user, agent, and tool messages in the original order
+
+Large outputs require confirmation. If Fainder prints a budget warning, narrow the range or rerun with `--confirm`:
+
+```bash
+fainder context claude:cab15fb3 --from-turn 1 --to-turn 240 --confirm
+fainder context claude:cab15fb3 --from-turn 1 --to-turn 240 --max-tokens 30000 --confirm
+```
+
+Useful context flags:
+
+- `--from-turn N --to-turn M`
+- `--around N --context K`
+- `--tail N`
+- `--role user|agent|tool|system|all`
+- `--truncate-tools`
+- `--no-tools`
+- `--max-tokens N`
+- `--confirm`
+- `--format json`
+
+Do not ask Fainder to summarize. If a summary is needed, summarize the deterministic `context` output in the current harness after reading it.
+
+## Resume Commands
+
+Search results include `resume_command`. Use it only when the user wants to reopen the original provider:
+
+```bash
+fainder search "SmartUp migration" --command-only --select 1
+fainder search "SmartUp migration" --copy --select 1
+fainder search "SmartUp migration" --open --select 1
+```
+
+For cross-harness continuation, prefer `inspect` and `context` over `resume_command`.
+
+## Query Rules
+
+- Default search is case-insensitive word matching.
+- Multiple words narrow results.
+- Use `--regex` for alternatives like `SmartUp|bedrock|shapeup`.
+- Use `--provider codex,claude` to reduce noise.
+- Use `--scope metadata` when full-text is too noisy.
+- Use `--json` for machine-readable output.
+
+## Config
+
+Override provider paths with `~/.config/fainder/config.toml`:
 
 ```toml
 [paths]
@@ -64,233 +171,3 @@ cursor = "~/Library/Application Support/Cursor/User/workspaceStorage"
 copilot = "~/Library/Application Support/Code/User/workspaceStorage"
 ```
 
-## Agent-First Usage
-
-Prefer the non-interactive CLI when you are an agent. It is deterministic, scriptable, and returns resume commands directly.
-
-Basic search:
-
-```bash
-fainder search SmartUp
-```
-
-Limit results:
-
-```bash
-fainder search "SmartUp agents" --limit 5
-```
-
-Search only specific providers:
-
-```bash
-fainder search "bedrock latency" --provider codex,claude --limit 10
-```
-
-Search metadata only, matching the TUI scope toggle:
-
-```bash
-fainder search "SmartUp agents" --scope metadata --limit 10
-```
-
-Use regex for alternatives or structured patterns:
-
-```bash
-fainder search "SmartUp|bedrock|shapeup" --regex --limit 20
-```
-
-Get machine-readable JSON:
-
-```bash
-fainder search "SmartUp agents" --json --limit 10
-```
-
-Show snippets and recent messages in human-readable output:
-
-```bash
-fainder search "SmartUp agents" --preview --limit 5
-```
-
-Print only the selected resume command:
-
-```bash
-fainder search "SmartUp agents" --command-only --select 1
-```
-
-Copy or open the selected resume command:
-
-```bash
-fainder search "SmartUp agents" --copy --select 1
-fainder search "SmartUp agents" --open --select 1
-```
-
-The JSON result items contain:
-
-- `provider`: conversation provider, such as `codex` or `claude`
-- `id`: provider-specific session/conversation id
-- `title`: inferred conversation title
-- `cwd`: working directory or project path, when available
-- `updated_at`: last known update timestamp
-- `resume_command`: shell command to resume or open the conversation
-- `score`: Fainder ranking score
-- `matched_in`: where the match was found, such as metadata or transcript text
-- `snippets`: matched text excerpts
-- `latest_messages`: recent messages for quick disambiguation
-
-For an agent, a strong default workflow is:
-
-1. Run `fainder doctor` to confirm available histories.
-2. Search with a broad query and JSON output.
-3. Inspect `provider`, `cwd`, `title`, `updated_at`, `snippets`, and `latest_messages`.
-4. Use `resume_command` only after selecting the intended conversation.
-5. If results are noisy, rerun with `--provider`, more query terms, `--limit`, or `--regex`.
-
-Example agent workflow:
-
-```bash
-fainder doctor
-fainder search "SmartUp agents" --json --limit 8
-fainder search "SmartUp agents" --provider codex --json --limit 5
-fainder search "SmartUp agents" --command-only --select 1
-```
-
-Do not blindly execute the first result. Prefer reporting the best candidates to the user when confidence is low.
-
-## Query Semantics
-
-Default search is word-based and case-insensitive.
-
-- A single word searches titles, paths, recent messages, and transcript content.
-- Multiple words narrow the search. `SmartUp agents` means both words should match.
-- Use quotes in the shell when a query has spaces.
-- Use `--regex` only when the query is a real regex or needs alternatives like `SmartUp|bedrock`.
-- Use `--provider codex,claude` to reduce noise and speed up targeted searches.
-- Use `--limit N` to control output volume.
-- Use `--scope all` to include transcript content. This is the default.
-- Use `--scope metadata` to search only title, path, and recent messages.
-- Use `--preview` for text output with snippets and latest messages.
-- Use `--json` for integrations such as Raycast or another agent harness.
-- Use `--select N` with `--command-only`, `--copy`, or `--open` when acting on a specific result.
-
-## Interactive TUI
-
-Humans can run:
-
-```bash
-fainder
-```
-
-TUI controls:
-
-- Type to search.
-- `Enter` copies the selected resume command.
-- `Ctrl-o` opens the selected conversation directly.
-- `Ctrl-p` toggles the preview pane.
-- `Tab` cycles provider filters.
-- `Ctrl-r` toggles regex mode.
-- `Ctrl-f` switches search scope.
-- `Esc` exits.
-
-The TUI shows waiting/searching state in the `Conversations` title, ranks recent matches higher, and displays project/repo context before the title.
-
-## Raycast Extension
-
-The repository includes a Raycast extension in `raycast/`. It is a UI wrapper around the non-interactive CLI and should call:
-
-```bash
-fainder search "<query>" --json --limit 50 --scope all
-```
-
-Provider and scope filters map to CLI flags:
-
-```bash
-fainder search "<query>" --json --limit 50 --scope metadata --provider claude
-```
-
-Develop locally:
-
-```bash
-cd raycast
-npm install --cache /private/tmp/fainder-npm-cache
-npm run dev
-```
-
-Build locally:
-
-```bash
-cd raycast
-npm run build
-```
-
-Publish to Raycast Store:
-
-```bash
-cd raycast
-npm run publish
-```
-
-Published Store installs are the only path that lets users install the extension fully from Raycast without running a local development server. The extension still depends on the local `fainder` binary; if it is missing, the Raycast UI should guide the user to run `brew install satelerd/tap/fainder`.
-
-Do not duplicate provider parsers in the Raycast code. Keep provider discovery, ranking, snippets, and resume command generation in the Rust CLI, then consume the JSON output.
-
-## Release Automation
-
-Use the repo release script for Homebrew releases:
-
-```bash
-scripts/release.sh 0.1.3
-```
-
-It requires a clean working tree. It bumps Cargo metadata, validates Rust, creates and pushes the git tag, computes the GitHub tarball SHA, updates `packaging/homebrew/fainder.rb`, and updates `satelerd/homebrew-tap`.
-
-## Practical Patterns
-
-Recover a project thread:
-
-```bash
-fainder search "SmartUp" --json --limit 10
-```
-
-Recover a specific debugging thread:
-
-```bash
-fainder search "timeout retry webhook" --json --limit 10
-```
-
-Search only Claude Code and Codex:
-
-```bash
-fainder search "kubernetes migration" --provider claude,codex --json --limit 10
-```
-
-Find one of several terms:
-
-```bash
-fainder search "SmartVOC|SmartOrders|multichannel" --regex --json --limit 15
-```
-
-Use the top candidate cautiously:
-
-```bash
-fainder search "SmartUp agents" --json --limit 1
-```
-
-Then inspect the `resume_command` field and decide whether to copy, show, or run it.
-
-Copy the top candidate after inspection:
-
-```bash
-fainder search "SmartUp agents" --copy --select 1
-```
-
-Open the top candidate only when the user wants to resume it:
-
-```bash
-fainder search "SmartUp agents" --open --select 1
-```
-
-## Safety
-
-- Fainder reads local histories and can surface sensitive conversation text. Do not paste large raw outputs into external services unless the user explicitly wants that.
-- `fainder search` itself is read-only.
-- `resume_command` may open an interactive tool or resume an agent session; ask before executing it if doing so could change files, spend tokens, or touch production systems.
-- When summarizing results, include only enough snippets to help the user choose the right conversation.
