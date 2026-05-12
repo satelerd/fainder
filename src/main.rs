@@ -4,6 +4,7 @@ mod config;
 mod model;
 mod providers;
 mod search;
+mod transcript;
 mod tui;
 
 use std::process::Command;
@@ -11,6 +12,7 @@ use std::process::Command;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use model::{ProviderKind, SearchOptions};
+use transcript::{ContextOptions, InspectOptions, RoleFilter};
 
 #[derive(Parser)]
 #[command(name = "fainder")]
@@ -58,6 +60,88 @@ enum Commands {
     },
     /// Show discovered providers, paths, and local session counts.
     Doctor,
+    /// Inspect one conversation by role, search matches, or turn windows.
+    Inspect {
+        /// Session reference formatted as provider:id, for example claude:abc123.
+        session: String,
+        /// Filter by role.
+        #[arg(long, default_value_t = RoleFilter::All)]
+        role: RoleFilter,
+        /// Search inside the selected conversation.
+        #[arg(long)]
+        find: Option<String>,
+        /// Treat --find as a case-insensitive regular expression.
+        #[arg(long)]
+        regex: bool,
+        /// Show all turns compactly.
+        #[arg(long)]
+        timeline: bool,
+        /// Show a single turn and optional context around it.
+        #[arg(long)]
+        turn: Option<usize>,
+        /// Show a window around a turn.
+        #[arg(long)]
+        around: Option<usize>,
+        /// Number of turns before/after --turn or --around.
+        #[arg(long, default_value_t = 5)]
+        context: usize,
+        /// Show the last N matching turns.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// Maximum number of matching turns to show.
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Print expanded message bodies instead of one-line previews.
+        #[arg(long)]
+        expand: bool,
+    },
+    /// Print a chronological transcript window for a selected conversation.
+    Context {
+        /// Session reference formatted as provider:id, for example codex:019dec17.
+        session: String,
+        /// First turn to include.
+        #[arg(long)]
+        from_turn: Option<usize>,
+        /// Last turn to include.
+        #[arg(long)]
+        to_turn: Option<usize>,
+        /// Print a window around a turn.
+        #[arg(long)]
+        around: Option<usize>,
+        /// Number of turns before/after --around.
+        #[arg(long, default_value_t = 10)]
+        context: usize,
+        /// Print the last N turns.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// Filter by role. Default prints chronological all roles.
+        #[arg(long, default_value_t = RoleFilter::All)]
+        role: RoleFilter,
+        /// Print large outputs after the token estimate warning.
+        #[arg(long)]
+        confirm: bool,
+        /// Token budget before --confirm is required.
+        #[arg(long, default_value_t = 10_000)]
+        max_tokens: usize,
+        /// Truncate output to this many characters.
+        #[arg(long)]
+        max_chars: Option<usize>,
+        /// Omit tool calls/results.
+        #[arg(long)]
+        no_tools: bool,
+        /// Truncate long tool calls/results.
+        #[arg(long)]
+        truncate_tools: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ContextFormat::Markdown)]
+        format: ContextFormat,
+        /// Alias for --format json.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -66,6 +150,12 @@ enum SearchScope {
     All,
     /// Search title, path, and recent messages only.
     Metadata,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ContextFormat {
+    Markdown,
+    Json,
 }
 
 fn main() -> Result<()> {
@@ -126,6 +216,69 @@ fn main() -> Result<()> {
             app::print_results(&results, preview);
         }
         Some(Commands::Doctor) => app::doctor(&config)?,
+        Some(Commands::Inspect {
+            session,
+            role,
+            find,
+            regex,
+            timeline,
+            turn,
+            around,
+            context,
+            tail,
+            limit,
+            json,
+            expand,
+        }) => transcript::inspect(
+            &config,
+            InspectOptions {
+                session_ref: session,
+                role,
+                find,
+                regex,
+                timeline,
+                turn,
+                around,
+                context,
+                tail,
+                limit,
+                json,
+                expand,
+            },
+        )?,
+        Some(Commands::Context {
+            session,
+            from_turn,
+            to_turn,
+            around,
+            context,
+            tail,
+            role,
+            confirm,
+            max_tokens,
+            max_chars,
+            no_tools,
+            truncate_tools,
+            format,
+            json,
+        }) => transcript::context(
+            &config,
+            ContextOptions {
+                session_ref: session,
+                from_turn,
+                to_turn,
+                around,
+                context,
+                tail,
+                role,
+                confirm,
+                max_tokens,
+                max_chars,
+                no_tools,
+                truncate_tools,
+                json: json || matches!(format, ContextFormat::Json),
+            },
+        )?,
         None => tui::run(config)?,
     }
 

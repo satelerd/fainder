@@ -8,6 +8,8 @@ Fainder is a tiny, local and read-only terminal app for finding and resuming you
 
 It searches Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot
 histories from one place, then returns the right resume command.
+Agents can also inspect a conversation by turn and print bounded chronological
+context without starting another harness or calling an LLM.
 
 ## Install
 
@@ -35,6 +37,31 @@ Type a query, pick a conversation, then press `Enter` to copy the resume command
 #### That’s it.
 
 <br />
+
+## Agent CLI
+
+Find candidates:
+
+```bash
+fainder search "SmartUp migration" --json --limit 8
+```
+
+Inspect one conversation before reading a large transcript:
+
+```bash
+fainder inspect claude:cab15fb3 --role user --limit 40
+fainder inspect claude:cab15fb3 --find "PR|commit|deploy" --regex
+fainder inspect claude:cab15fb3 --around 96 --context 8
+```
+
+Print a deterministic transcript window in chronological order:
+
+```bash
+fainder context claude:cab15fb3 --from-turn 90 --to-turn 130
+fainder context codex:019dec17 --tail 80 --truncate-tools
+```
+
+Large context views show a token estimate first and require `--confirm`.
 
 ## Raycast
 
@@ -102,6 +129,8 @@ query, parse, and safely use Fainder.
 cargo test
 cargo run
 cargo run -- search SmartUp --limit 5
+cargo run -- inspect codex:019dec17 --role user --limit 10
+cargo run -- context codex:019dec17 --tail 20
 ```
 
 ## Release
