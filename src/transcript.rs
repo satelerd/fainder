@@ -106,6 +106,13 @@ pub fn inspect(config: &Config, options: InspectOptions) -> Result<()> {
     }
 
     if options.json {
+        // Bound each turn unless --expand is set. Full untruncated JSON of a
+        // --tail/--find selection can balloon to 100k+ tokens and get cut off
+        // by the calling harness; previews keep the payload agent-friendly.
+        let turns = turns
+            .iter()
+            .map(|turn| bound_turn(turn, options.expand, INSPECT_JSON_PREVIEW_CHARS))
+            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&InspectOutput {
@@ -118,7 +125,8 @@ pub fn inspect(config: &Config, options: InspectOptions) -> Result<()> {
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 total_turns: transcript.turns.len(),
-                turns: turns.iter().map(|turn| (*turn).clone()).collect(),
+                truncated: !options.expand,
+                turns,
             })?
         );
         return Ok(());
@@ -822,6 +830,20 @@ fn clean_context_turns(turns: &[&TranscriptTurn], options: &ContextOptions) -> V
         .collect()
 }
 
+/// Per-turn character cap for `inspect --json` previews (without --expand).
+const INSPECT_JSON_PREVIEW_CHARS: usize = 280;
+
+/// Clone a turn, truncating its text/tool bodies unless `expand` is set.
+fn bound_turn(turn: &TranscriptTurn, expand: bool, max_chars: usize) -> TranscriptTurn {
+    let mut next = turn.clone();
+    if !expand {
+        next.text = truncate(&next.text, max_chars);
+        next.tool_input = next.tool_input.map(|value| truncate(&value, max_chars));
+        next.tool_result = next.tool_result.map(|value| truncate(&value, max_chars));
+    }
+    next
+}
+
 #[derive(Serialize)]
 struct InspectOutput {
     provider: ProviderKind,
@@ -829,6 +851,8 @@ struct InspectOutput {
     title: String,
     cwd: Option<String>,
     total_turns: usize,
+    /// True when turn bodies are previews; pass --expand for full text.
+    truncated: bool,
     turns: Vec<TranscriptTurn>,
 }
 

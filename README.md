@@ -33,7 +33,11 @@ Humans can open the TUI:
 fainder
 ```
 
-Type a query, pick a conversation, then press `Enter` to copy the resume command.
+Fainder opens on your most recent conversations, newest first. Type a query,
+pick a conversation, then press `Enter` to copy the resume command. A live line
+under the search box always tells you exactly how your query is being matched.
+Press `Ctrl-s` (or `Tab`) for a filter panel to pick providers, search mode, and
+scope.
 #### That’s it.
 
 <br />
@@ -43,6 +47,7 @@ Type a query, pick a conversation, then press `Enter` to copy the resume command
 Find candidates:
 
 ```bash
+fainder recent --limit 8
 fainder search "SmartUp migration" --json --limit 8
 ```
 
@@ -75,8 +80,9 @@ npm run dev
 
 Now you can find your conversations from Raycast.
 
-The extension calls `fainder search <query> --json`, lists conversations, and
-lets you copy or open the selected `resume_command`.
+The extension calls `fainder recent --json` before you type, then
+`fainder search <query> --json` once you search. It lists conversations and lets
+you copy or open the selected `resume_command`.
 
 For Raycast-only usage, the extension needs to be published to the Raycast
 Store. The extension is prepared for that flow:
@@ -105,10 +111,14 @@ query, parse, and safely use Fainder.
 
 ## Query Behavior
 
-- A single word searches titles, paths, recent messages, and transcript content.
-- Multiple words narrow the search. For example, `SmartUp agents` matches
-  conversations containing both words.
-- Regex mode lets you use patterns like `SmartUp|bedrock`.
+- By default the query matches as one exact phrase (case-insensitive). For
+  example, `SmartUp agents` only matches conversations with those words adjacent
+  and in that order.
+- `words` mode (`Ctrl-m` in the TUI, `--words` in the CLI) requires every word
+  independently in any order.
+- `regex` mode lets you use patterns like `SmartUp|bedrock`.
+- A single word behaves the same in every mode and searches titles, paths,
+  recent messages, and transcript content.
 - Search waits briefly after typing so it does not scan while you are still
   entering a query.
 

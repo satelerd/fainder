@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,52 @@ pub fn sessions(config: &Config, provider: ProviderKind) -> Result<Vec<Session>>
         ProviderKind::Hermes => hermes_sessions(&config.path(provider)),
         ProviderKind::Cursor => vscode_style_sessions(&config.path(provider), provider, "cursor"),
         ProviderKind::Copilot => vscode_style_sessions(&config.path(provider), provider, "code"),
+    }
+}
+
+pub fn recent_sessions(
+    config: &Config,
+    provider: ProviderKind,
+    limit: usize,
+) -> Result<Vec<Session>> {
+    let limit = limit.max(1);
+    match provider {
+        ProviderKind::Codex => recent_file_sessions(
+            &config.path(provider).join("sessions"),
+            limit,
+            |path| !skip_codex_path(path),
+            codex_session_from_transcript,
+        ),
+        ProviderKind::Claude => recent_file_sessions(
+            &config.path(provider).join("projects"),
+            limit,
+            |path| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| !stem.starts_with("agent-"))
+            },
+            |path| {
+                let id = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if id.is_empty() {
+                    Ok(None)
+                } else {
+                    claude_session_from_transcript(path, id)
+                }
+            },
+        ),
+        ProviderKind::Opencode
+        | ProviderKind::Hermes
+        | ProviderKind::Cursor
+        | ProviderKind::Copilot => {
+            let mut sessions = sessions(config, provider)?;
+            sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            sessions.truncate(limit);
+            Ok(sessions)
+        }
     }
 }
 
@@ -72,6 +119,34 @@ pub fn content_sessions(
     }
 }
 
+fn recent_file_sessions<F, P>(
+    root: &Path,
+    limit: usize,
+    include: P,
+    parser: F,
+) -> Result<Vec<Session>>
+where
+    F: Fn(&Path) -> Result<Option<Session>>,
+    P: Fn(&Path) -> bool,
+{
+    let mut paths = jsonl_paths(root)
+        .into_iter()
+        .filter(|path| include(path))
+        .collect::<Vec<_>>();
+    paths.sort_by(|a, b| metadata_time(b).cmp(&metadata_time(a)));
+
+    let mut sessions = Vec::new();
+    for path in paths.into_iter().take(limit.saturating_mul(4)) {
+        if let Some(session) = parser(&path)? {
+            sessions.push(session);
+            if sessions.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(sessions)
+}
+
 pub fn doctor(config: &Config) -> Result<Vec<ProviderReport>> {
     let mut reports = Vec::new();
     for provider in ProviderKind::all() {
@@ -119,7 +194,133 @@ fn codex_sessions(root: &Path) -> Result<Vec<Session>> {
         }
     }
 
-    Ok(sessions)
+    for path in json_files(&root.join("sessions"), true)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .filter(|path| !skip_codex_path(path))
+    {
+        if let Some(session) = codex_session_from_transcript(&path)? {
+            sessions.push(session);
+        }
+    }
+
+    Ok(merged_sessions(sessions))
+}
+
+fn merged_sessions(sessions: Vec<Session>) -> Vec<Session> {
+    let mut by_key: HashMap<(ProviderKind, String), Session> = HashMap::new();
+    for session in sessions {
+        let key = (session.provider, session.id.clone());
+        match by_key.get_mut(&key) {
+            Some(existing) => merge_session(existing, session),
+            None => {
+                by_key.insert(key, session);
+            }
+        }
+    }
+    by_key.into_values().collect()
+}
+
+fn merge_session(existing: &mut Session, next: Session) {
+    if existing.title == existing.id && next.title != next.id {
+        existing.title = next.title;
+    }
+    if existing.cwd.is_none() && next.cwd.is_some() {
+        existing.cwd = next.cwd;
+        existing.resume_command = next.resume_command;
+    }
+    if existing.created_at.is_none()
+        || next
+            .created_at
+            .is_some_and(|created| existing.created_at.is_some_and(|current| created < current))
+    {
+        existing.created_at = next.created_at;
+    }
+    if existing.updated_at.is_none()
+        || next
+            .updated_at
+            .is_some_and(|updated| existing.updated_at.is_some_and(|current| updated > current))
+    {
+        existing.updated_at = next.updated_at;
+    }
+    if existing.message_count.is_none() && next.message_count.is_some() {
+        existing.message_count = next.message_count;
+    }
+    if existing.source_path.is_none() && next.source_path.is_some() {
+        existing.source_path = next.source_path;
+    }
+    if existing.transcript_path.is_none() && next.transcript_path.is_some() {
+        existing.transcript_path = next.transcript_path;
+    }
+    if existing.latest_messages.is_empty() && !next.latest_messages.is_empty() {
+        existing.latest_messages = next.latest_messages;
+    }
+}
+
+fn codex_message_text(value: &Value) -> Option<(bool, String)> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("event_msg") => {
+            let payload = value.get("payload")?;
+            let is_user_message =
+                payload.get("type").and_then(Value::as_str) == Some("user_message");
+            string_field(payload, "message")
+                .filter(|message| !message.trim().is_empty())
+                .map(|message| (is_user_message, message))
+        }
+        Some("response_item") => {
+            let payload = value.get("payload")?;
+            if payload.get("type").and_then(Value::as_str) != Some("message") {
+                return None;
+            }
+            let is_user_message = payload.get("role").and_then(Value::as_str) == Some("user");
+            let text = text_from_value(payload.get("content").unwrap_or(payload));
+            (!text.trim().is_empty()).then_some((is_user_message, text))
+        }
+        _ => None,
+    }
+}
+
+fn timestamp_from_value(value: &Value) -> Option<DateTime<Utc>> {
+    string_field(value, "timestamp")
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| string_field(payload, "timestamp"))
+        })
+        .and_then(|timestamp| parse_time(Some(&timestamp)))
+}
+
+fn metadata_time(path: &Path) -> Option<DateTime<Utc>> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(DateTime::<Utc>::from)
+}
+
+fn jsonl_paths(root: &Path) -> Vec<PathBuf> {
+    json_files(root, true)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect()
+}
+
+fn claude_transcript_paths(projects: &Path) -> Vec<PathBuf> {
+    jsonl_paths(projects)
+        .into_iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| !stem.starts_with("agent-"))
+        })
+        .collect()
+}
+
+fn max_time(current: Option<DateTime<Utc>>, next: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    Some(current.map_or(next, |current| current.max(next)))
+}
+
+fn min_time(current: Option<DateTime<Utc>>, next: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    Some(current.map_or(next, |current| current.min(next)))
 }
 
 fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
@@ -129,40 +330,40 @@ fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
     let mut cwd = None;
     let mut title = None;
     let mut created_at = None;
-    let mut updated_at = fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .map(DateTime::<Utc>::from);
+    let mut updated_at = metadata_time(path);
     let mut message_count = 0usize;
     let mut latest = Vec::new();
+    let mut is_subagent = false;
 
-    for line in reader.lines().map_while(|line| line.ok()).take(140) {
+    for line in reader.lines().map_while(|line| line.ok()) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(ts) = string_field(&value, "timestamp").and_then(|t| parse_time(Some(&t))) {
-            updated_at = Some(ts);
-            created_at.get_or_insert(ts);
+        if let Some(ts) = timestamp_from_value(&value) {
+            updated_at = max_time(updated_at, ts);
+            created_at = min_time(created_at, ts);
         }
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
             if let Some(payload) = value.get("payload") {
                 id = string_field(payload, "id").or(id);
                 cwd = string_field(payload, "cwd").map(PathBuf::from).or(cwd);
+                is_subagent |= payload
+                    .get("source")
+                    .and_then(|source| source.get("subagent"))
+                    .is_some()
+                    || payload.get("thread_source").and_then(Value::as_str) == Some("subagent");
             }
         }
-        if value.get("type").and_then(Value::as_str) == Some("event_msg") {
-            if let Some(payload) = value.get("payload") {
-                if let Some(message) = string_field(payload, "message") {
-                    message_count += 1;
-                    let is_user_message =
-                        payload.get("type").and_then(Value::as_str) == Some("user_message");
-                    if title.is_none() && is_user_message {
-                        title = Some(short_title(&message));
-                    }
-                    if is_user_message {
-                        push_latest(&mut latest, message);
-                    }
-                }
+        if let Some((is_user_message, message)) = codex_message_text(&value) {
+            if is_context_message(&message) {
+                continue;
+            }
+            message_count += 1;
+            if title.is_none() && is_user_message {
+                title = Some(short_title(&message));
+            }
+            if is_user_message {
+                push_latest(&mut latest, message);
             }
         }
     }
@@ -171,6 +372,9 @@ fn codex_session_from_transcript(path: &Path) -> Result<Option<Session>> {
     let Some(id) = id else {
         return Ok(None);
     };
+    if is_subagent {
+        return Ok(None);
+    }
     let title = title.unwrap_or_else(|| id.clone());
     let resume_command = if let Some(cwd) = &cwd {
         format!("cd {} && codex resume {}", shell_path(cwd), shell(&id))
@@ -245,29 +449,43 @@ fn claude_sessions(root: &Path) -> Result<Vec<Session>> {
         }
     }
 
-    Ok(sessions)
+    for path in claude_transcript_paths(&projects) {
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(session) = claude_session_from_transcript(&path, id)? {
+            sessions.push(session);
+        }
+    }
+
+    Ok(merged_sessions(sessions))
 }
 
 fn claude_session_from_transcript(path: &Path, id: String) -> Result<Option<Session>> {
     let mut title = None;
     let mut cwd = None;
     let mut created_at = None;
-    let mut updated_at = fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .map(DateTime::<Utc>::from);
+    let mut updated_at = metadata_time(path);
     let mut message_count = 0usize;
     let mut latest = Vec::new();
 
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    for line in reader.lines().map_while(|line| line.ok()).take(300) {
+    for line in reader.lines().map_while(|line| line.ok()) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if let Some(ts) = string_field(&value, "timestamp").and_then(|t| parse_time(Some(&t))) {
-            updated_at = Some(ts);
-            created_at.get_or_insert(ts);
+        if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return Ok(None);
+        }
+        if let Some(ts) = timestamp_from_value(&value) {
+            updated_at = max_time(updated_at, ts);
+            created_at = min_time(created_at, ts);
         }
         cwd = string_field(&value, "cwd").map(PathBuf::from).or(cwd);
         let message_type = value.get("type").and_then(Value::as_str);
@@ -275,9 +493,12 @@ fn claude_session_from_transcript(path: &Path, id: String) -> Result<Option<Sess
             if let Some(message) = value.get("message") {
                 let text = text_from_value(message.get("content").unwrap_or(message));
                 if !text.is_empty() {
+                    if is_context_message(&text) {
+                        continue;
+                    }
                     message_count += 1;
-                    title.get_or_insert_with(|| short_title(&text));
                     if message_type == Some("user") {
+                        title.get_or_insert_with(|| short_title(&text));
                         push_latest(&mut latest, text);
                     }
                 }
@@ -1047,6 +1268,27 @@ fn short_title(text: &str) -> String {
     } else {
         text
     }
+}
+
+fn is_context_message(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("# AGENTS.md instructions")
+        || text.starts_with("<environment_context>")
+        || text.starts_with("<image ")
+        || text.starts_with("<command-message>")
+        || text.starts_with("<command-name>")
+        || text.starts_with("<local-command-caveat>")
+        || text.starts_with("<local-command-stdout>")
+        || text.starts_with("<local-command-stderr>")
+        || text.starts_with("Base directory for this skill:")
+        || text.starts_with("The following is the Codex agent history")
+        || text.starts_with(">>> TRANSCRIPT START")
+        || text.starts_with("Reviewed Codex session id:")
+        || text
+            .chars()
+            .take(160)
+            .collect::<String>()
+            .contains("<command-message>")
 }
 
 fn push_latest(latest: &mut Vec<String>, text: String) {
