@@ -103,10 +103,13 @@ fainder inspect claude:cab15fb3 --find "PR|commit" --regex --json
 
 `inspect --json` returns previews of each turn (bodies capped, `truncated: true`)
 to keep the payload small — a broad `--find ... --json` over a long conversation
-would otherwise return 100k+ tokens and get cut off by the harness. To read the
-full text of a specific range, do **not** add `--expand`; instead note the turn
-numbers and pull that window with `fainder context --from-turn N --to-turn M`.
-Use `--expand` only for a narrow, already-bounded selection.
+would otherwise return 100k+ tokens and get cut off by the harness. Each turn
+also carries `full_tokens`, an estimate of its full (untruncated) body size, so
+you can tell which turns were heavily clipped. To read the full text of a
+specific range, do **not** add `--expand`; instead note the turn numbers (use
+`full_tokens` to budget the call) and pull that window with
+`fainder context --from-turn N --to-turn M`. Use `--expand` only for a narrow,
+already-bounded selection.
 
 `inspect` output uses stable turn numbers. Feed those turn numbers into `context`.
 

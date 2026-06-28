@@ -25,6 +25,9 @@ pub fn recent(
             Err(_) => continue,
         };
         for session in sessions {
+            if is_noise_session(&session) {
+                continue;
+            }
             results.push(session_result(session, 0, "recent".to_string(), Vec::new()));
         }
     }
@@ -32,6 +35,18 @@ pub fn recent(
     sort_results(&mut results);
     results.truncate(limit.max(1));
     Ok(results)
+}
+
+/// True for rows that are not real conversations: empty workspace/UI-state
+/// entries (notably VS Code-style sidebars) with no messages and no content.
+fn is_noise_session(session: &Session) -> bool {
+    let no_messages = session.message_count == Some(0);
+    let no_content = session.latest_messages.is_empty();
+    let json_blob_title = {
+        let title = session.title.trim();
+        title.starts_with('{') && title.ends_with('}')
+    };
+    no_messages && no_content && (json_blob_title || session.created_at.is_none())
 }
 
 pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResult>> {
@@ -55,6 +70,9 @@ pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResu
             Err(_) => continue,
         };
         for session in sessions {
+            if is_noise_session(&session) {
+                continue;
+            }
             let mut matched_in = Vec::new();
             let mut snippets = Vec::new();
             let mut score = 0;
@@ -251,8 +269,48 @@ pub fn highlightless_snippet(text: &str, query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Matcher, highlightless_snippet};
-    use crate::model::SearchMode;
+    use super::{Matcher, highlightless_snippet, is_noise_session};
+    use crate::model::{ProviderKind, SearchMode, Session};
+
+    fn session(title: &str, message_count: Option<usize>, latest: Vec<String>) -> Session {
+        Session {
+            provider: ProviderKind::Cursor,
+            id: "x".to_string(),
+            title: title.to_string(),
+            cwd: None,
+            created_at: None,
+            updated_at: None,
+            message_count,
+            source_path: None,
+            transcript_path: None,
+            resume_command: "cursor".to_string(),
+            latest_messages: latest,
+        }
+    }
+
+    #[test]
+    fn noise_session_filters_empty_ui_state_rows() {
+        // Empty VS Code-style row with a JSON-blob title and no messages.
+        assert!(is_noise_session(&session(
+            "{\"isSideBarExpanded\":false}",
+            Some(0),
+            Vec::new()
+        )));
+        // Empty row with no created_at and no content.
+        assert!(is_noise_session(&session("workspace", Some(0), Vec::new())));
+        // A real conversation with messages is kept.
+        assert!(!is_noise_session(&session(
+            "fix the build",
+            Some(12),
+            vec!["hello".to_string()]
+        )));
+        // Zero messages but actual content present is kept.
+        assert!(!is_noise_session(&session(
+            "draft",
+            Some(0),
+            vec!["a real prompt".to_string()]
+        )));
+    }
 
     #[test]
     fn words_mode_requires_all_terms_case_insensitive() {

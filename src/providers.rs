@@ -873,6 +873,9 @@ fn vscode_content_snippets(
     let mut snippets = Vec::new();
     for row in rows.filter_map(|row| row.ok()) {
         for text in json_text_chunks(&row) {
+            if is_context_message(&text) {
+                continue;
+            }
             if matcher.is_match(&text) {
                 snippets.push(highlightless_snippet(&text, ""));
                 if snippets.len() >= limit {
@@ -1023,6 +1026,9 @@ fn file_content_snippets(
     let mut snippets = Vec::new();
     for line in reader.lines().map_while(|line| line.ok()) {
         let text = searchable_line_text(&line);
+        if is_context_message(&text) {
+            continue;
+        }
         if matcher.is_match(&text) {
             snippets.push(highlightless_snippet(&text, ""));
             if snippets.len() >= limit {
@@ -1048,6 +1054,9 @@ fn opencode_content_snippets(
     let mut snippets = Vec::new();
     for row in rows.filter_map(|row| row.ok()) {
         let text = searchable_line_text(&row);
+        if is_context_message(&text) {
+            continue;
+        }
         if matcher.is_match(&text) {
             snippets.push(highlightless_snippet(&text, ""));
             if snippets.len() >= limit {
@@ -1143,6 +1152,7 @@ fn skip_codex_path(path: &Path) -> bool {
         || text.contains("/cache/")
         || text.contains("/shell_snapshots/")
         || text.contains("/ambient-suggestions/")
+        || path.file_name().and_then(|n| n.to_str()) == Some("session_index.jsonl")
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -1274,6 +1284,8 @@ fn is_context_message(text: &str) -> bool {
     let text = text.trim_start();
     text.starts_with("# AGENTS.md instructions")
         || text.starts_with("<environment_context>")
+        || text.starts_with("<permissions instructions>")
+        || text.starts_with("<user_instructions>")
         || text.starts_with("<image ")
         || text.starts_with("<command-message>")
         || text.starts_with("<command-name>")
