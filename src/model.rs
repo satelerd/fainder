@@ -18,6 +18,9 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    /// Number of provider variants (keep in sync with `all`).
+    pub const COUNT: usize = 6;
+
     pub fn all() -> Vec<Self> {
         vec![
             Self::Codex,
@@ -94,11 +97,62 @@ pub struct SearchResult {
     pub latest_messages: Vec<String>,
 }
 
+/// How the query text is interpreted when matching conversations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchMode {
+    /// Match the whole query as one literal substring (case-insensitive).
+    Phrase,
+    /// Split the query into words and require all of them (any order).
+    Words,
+    /// Treat the query as a case-insensitive regular expression.
+    Regex,
+}
+
+impl SearchMode {
+    /// Short label shown in the TUI header and CLI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Phrase => "phrase",
+            Self::Words => "words",
+            Self::Regex => "regex",
+        }
+    }
+
+    /// Cycle to the next mode for the TUI toggle.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Phrase => Self::Words,
+            Self::Words => Self::Regex,
+            Self::Regex => Self::Phrase,
+        }
+    }
+
+    /// Human sentence describing how `query` is being matched right now.
+    pub fn describe(self, query: &str) -> String {
+        let query = query.trim();
+        match self {
+            Self::Phrase => format!("Matching the exact phrase \"{query}\""),
+            Self::Words => {
+                let words: Vec<&str> = query.split_whitespace().collect();
+                if words.len() <= 1 {
+                    format!("Matching conversations that contain \"{query}\"")
+                } else {
+                    format!(
+                        "Matching conversations that contain {}",
+                        words.join(" AND ")
+                    )
+                }
+            }
+            Self::Regex => format!("Matching the regular expression /{query}/i"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
     pub query: String,
     pub providers: Vec<ProviderKind>,
-    pub regex: bool,
+    pub mode: SearchMode,
     pub limit: usize,
     pub full_text: bool,
 }

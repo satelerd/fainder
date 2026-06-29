@@ -52,7 +52,7 @@ export default function Command() {
 
   useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < 2) {
+    if (trimmed.length > 0 && trimmed.length < 2) {
       setResults([]);
       setErrorMessage(null);
       setIsLoading(false);
@@ -60,7 +60,7 @@ export default function Command() {
     }
 
     setIsLoading(true);
-    searchFainder(trimmed, provider, scope)
+    listFainder(trimmed, provider, scope)
       .then((nextResults) => {
         setResults(nextResults);
         setErrorMessage(null);
@@ -132,7 +132,7 @@ export default function Command() {
           description={errorMessage}
           actions={<SetupActions />}
         />
-      ) : query.trim().length < 2 ? (
+      ) : query.trim().length > 0 && query.trim().length < 2 ? (
         <List.EmptyView
           icon={Icon.MagnifyingGlass}
           title="Search Fainder"
@@ -241,12 +241,15 @@ function ConversationActions({
   );
 }
 
-async function searchFainder(
+async function listFainder(
   query: string,
   provider: Provider,
   scope: Scope,
 ): Promise<SearchResult[]> {
-  const args = ["search", query, "--json", "--limit", "50", "--scope", scope];
+  const args =
+    query.length === 0
+      ? ["recent", "--json", "--limit", "50"]
+      : ["search", query, "--json", "--limit", "50", "--scope", scope];
   if (provider !== "all") {
     args.push("--provider", provider);
   }
@@ -418,7 +421,7 @@ function relativeDate(value?: string | null): string {
   const days = Math.floor(hours / 24);
   if (days === 1) return "yesterday";
   if (days < 7) return `${days}d ago`;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
   }).format(new Date(time));
@@ -430,7 +433,7 @@ function startedDate(value?: string | null): string {
   if (Number.isNaN(time)) return value;
   const deltaHours = Math.floor((Date.now() - time) / 3_600_000);
   if (deltaHours < 24) {
-    return new Intl.DateTimeFormat(undefined, {
+    return new Intl.DateTimeFormat("en-US", {
       hour: "2-digit",
       minute: "2-digit",
     }).format(new Date(time));
@@ -449,10 +452,7 @@ function contextLine(result: SearchResult): string {
     parts.push(project);
   }
   parts.push(labelProvider(result.provider));
-  if (parts.length > 0) return parts.join("  ·  ");
-  return result.matched_in === "title"
-    ? "Conversation title match"
-    : `matched in ${result.matched_in}`;
+  return parts.join("  ·  ");
 }
 
 function compactMessages(value?: number | null): string {
@@ -470,7 +470,7 @@ function lastLong(value?: string | null): string {
   if (!value) return "-";
   const time = new Date(value).getTime();
   if (Number.isNaN(time)) return value;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "2-digit",

@@ -19,7 +19,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::clipboard;
 use crate::config::Config;
-use crate::model::{ProviderKind, SearchOptions, SearchResult};
+use crate::model::{ProviderKind, SearchMode, SearchOptions, SearchResult};
 use crate::search;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(450);
@@ -50,15 +50,20 @@ struct App {
     list_state: ListState,
     status: String,
     providers: Vec<ProviderKind>,
-    regex: bool,
+    mode: SearchMode,
     full_text: bool,
     show_preview: bool,
+    show_filters: bool,
+    filter_cursor: usize,
     preview_scroll: u16,
     search_due: Option<Instant>,
     searching: bool,
     search_rx: Option<Receiver<Result<Vec<SearchResult>, String>>>,
     search_seq: u64,
 }
+
+/// Rows in the filter panel, in display order.
+const FILTER_ROWS: usize = ProviderKind::COUNT + 2;
 
 impl App {
     fn new(config: Config) -> Self {
@@ -70,9 +75,11 @@ impl App {
             list_state: ListState::default(),
             status: String::new(),
             providers: Vec::new(),
-            regex: false,
+            mode: SearchMode::Phrase,
             full_text: true,
             show_preview: false,
+            show_filters: false,
+            filter_cursor: 0,
             preview_scroll: 0,
             search_due: None,
             searching: false,
@@ -82,6 +89,9 @@ impl App {
     }
 
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        // Open straight into the most recent conversations (chronological view)
+        // so the tool is useful before typing anything.
+        self.start_recent();
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(80))? {
@@ -104,6 +114,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.show_filters {
+            return self.handle_filter_key(key);
+        }
         match key.code {
             KeyCode::Esc => return Ok(true),
             KeyCode::Char('q') if key.modifiers.is_empty() && self.query.is_empty() => {
@@ -113,8 +126,9 @@ impl App {
             KeyCode::Char(ch) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match ch {
-                        'r' => {
-                            self.regex = !self.regex;
+                        's' => self.toggle_filters(),
+                        'm' | 'r' => {
+                            self.mode = self.mode.next();
                             self.schedule_search();
                         }
                         'f' => {
@@ -140,10 +154,7 @@ impl App {
             KeyCode::Backspace => {
                 self.query.pop();
                 if self.query.is_empty() {
-                    self.results.clear();
-                    self.selected = 0;
-                    self.search_due = None;
-                    self.status.clear();
+                    self.start_recent();
                 } else {
                     self.schedule_search();
                 }
@@ -152,8 +163,11 @@ impl App {
             KeyCode::Down => self.move_selection(1),
             KeyCode::PageUp => self.scroll_preview(-6),
             KeyCode::PageDown => self.scroll_preview(6),
+            KeyCode::Enter if self.query.trim().is_empty() && self.results.is_empty() => {
+                self.start_recent();
+            }
             KeyCode::Enter => self.copy_selected(),
-            KeyCode::Tab => self.cycle_provider(),
+            KeyCode::Tab => self.toggle_filters(),
             KeyCode::F(2) => {
                 self.full_text = !self.full_text;
                 self.schedule_search();
@@ -164,13 +178,59 @@ impl App {
         Ok(false)
     }
 
+    /// Key handling while the filter panel is open.
+    fn handle_filter_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Tab => self.toggle_filters(),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_filters()
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+            KeyCode::Up => {
+                self.filter_cursor = (self.filter_cursor + FILTER_ROWS - 1) % FILTER_ROWS;
+            }
+            KeyCode::Down => {
+                self.filter_cursor = (self.filter_cursor + 1) % FILTER_ROWS;
+            }
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right | KeyCode::Left => {
+                self.activate_filter_row();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn toggle_filters(&mut self) {
+        self.show_filters = !self.show_filters;
+        self.filter_cursor = 0;
+    }
+
+    /// Toggle/cycle whatever filter row the cursor is on.
+    fn activate_filter_row(&mut self) {
+        let providers = ProviderKind::all();
+        if self.filter_cursor < providers.len() {
+            let provider = providers[self.filter_cursor];
+            if let Some(pos) = self.providers.iter().position(|p| *p == provider) {
+                self.providers.remove(pos);
+            } else {
+                self.providers.push(provider);
+            }
+        } else if self.filter_cursor == providers.len() {
+            self.mode = self.mode.next();
+        } else {
+            self.full_text = !self.full_text;
+        }
+        if self.query.trim().is_empty() {
+            self.start_recent();
+        } else {
+            self.schedule_search();
+        }
+    }
+
     fn start_search(&mut self) {
         self.search_due = None;
         if self.query.trim().len() < 2 {
-            self.results.clear();
-            self.selected = 0;
-            self.list_state.select(None);
-            self.status.clear();
+            self.start_recent();
             return;
         }
         self.search_seq = self.search_seq.wrapping_add(1);
@@ -181,7 +241,7 @@ impl App {
         let options = SearchOptions {
             query: self.query.clone(),
             providers: self.providers.clone(),
-            regex: self.regex,
+            mode: self.mode,
             limit: 50,
             full_text: self.full_text,
         };
@@ -193,6 +253,25 @@ impl App {
             } else {
                 result
             });
+        });
+        self.search_rx = Some(rx);
+    }
+
+    fn start_recent(&mut self) {
+        self.search_due = None;
+        self.search_seq = self.search_seq.wrapping_add(1);
+        let config = self.config.clone();
+        let providers = self.providers.clone();
+        self.results.clear();
+        self.selected = 0;
+        self.list_state.select(None);
+        self.preview_scroll = 0;
+        self.searching = true;
+        self.status.clear();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = search::recent(&config, &providers, 50).map_err(|error| error.to_string());
+            let _ = tx.send(result);
         });
         self.search_rx = Some(rx);
     }
@@ -287,38 +366,30 @@ impl App {
         Ok(())
     }
 
-    fn cycle_provider(&mut self) {
-        self.providers = match self.providers.as_slice() {
-            [] => vec![ProviderKind::Codex],
-            [ProviderKind::Codex] => vec![ProviderKind::Claude],
-            [ProviderKind::Claude] => vec![ProviderKind::Opencode],
-            [ProviderKind::Opencode] => vec![ProviderKind::Hermes],
-            [ProviderKind::Hermes] => vec![ProviderKind::Cursor],
-            [ProviderKind::Cursor] => vec![ProviderKind::Copilot],
-            [ProviderKind::Copilot] => Vec::new(),
-            _ => Vec::new(),
-        };
-        self.schedule_search();
-    }
-
     fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(10),
+                Constraint::Length(1),
+                Constraint::Min(8),
                 Constraint::Length(1),
             ])
             .split(area);
 
         self.draw_search(frame, chunks[0]);
-        self.draw_body(frame, chunks[1]);
-        self.draw_status(frame, chunks[2]);
+        self.draw_hint(frame, chunks[1]);
+        self.draw_body(frame, chunks[2]);
+        self.draw_status(frame, chunks[3]);
+
+        if self.show_filters {
+            self.draw_filters(frame, area);
+        }
     }
 
-    fn draw_search(&self, frame: &mut Frame, area: Rect) {
-        let provider = if self.providers.is_empty() {
+    fn provider_summary(&self) -> String {
+        if self.providers.is_empty() {
             "all".to_string()
         } else {
             self.providers
@@ -326,10 +397,14 @@ impl App {
                 .map(|p| p.label())
                 .collect::<Vec<_>>()
                 .join(",")
-        };
+        }
+    }
+
+    fn draw_search(&self, frame: &mut Frame, area: Rect) {
         let title = format!(
-            " Fainder  provider:{provider}  mode:{}  scope:{} ",
-            if self.regex { "regex" } else { "words" },
+            " Fainder  providers:{}  mode:{}  scope:{} ",
+            self.provider_summary(),
+            self.mode.label(),
             if self.full_text {
                 "all text"
             } else {
@@ -347,6 +422,85 @@ impl App {
         frame.render_widget(input, area);
     }
 
+    /// One-line description of exactly what the current query/mode will match.
+    fn draw_hint(&self, frame: &mut Frame, area: Rect) {
+        let line = if self.query.trim().is_empty() {
+            Line::from(vec![
+                Span::styled(
+                    "Showing recent conversations  ",
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    "· type to search · Ctrl-s filters · Ctrl-m mode",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("▸ ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    self.mode.describe(&self.query),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ])
+        };
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    /// Centered overlay panel for choosing providers, mode, and scope.
+    fn draw_filters(&self, frame: &mut Frame, area: Rect) {
+        let providers = ProviderKind::all();
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Providers  (Space to toggle, empty = all)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for (index, provider) in providers.iter().enumerate() {
+            let checked = self.providers.is_empty() || self.providers.contains(provider);
+            lines.push(filter_row(
+                index == self.filter_cursor,
+                &format!("[{}] {}", if checked { "x" } else { " " }, provider.label()),
+                provider_color(*provider),
+            ));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Mode",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(filter_row(
+            self.filter_cursor == providers.len(),
+            &format!("‹ {} ›   (phrase · words · regex)", self.mode.label()),
+            Color::White,
+        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Scope",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(filter_row(
+            self.filter_cursor == providers.len() + 1,
+            if self.full_text {
+                "‹ all text ›   (titles+paths+content)"
+            } else {
+                "‹ titles only ›   (titles+paths+recent)"
+            },
+            Color::White,
+        ));
+
+        let rect = centered_rect(54, 18, area);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                rounded_block()
+                    .borders(Borders::ALL)
+                    .title(" Filters  ↑↓ move · Space toggle · Esc close ")
+                    .border_style(Style::default().fg(Color::Magenta)),
+            ),
+            rect,
+        );
+    }
+
     fn draw_body(&mut self, frame: &mut Frame, area: Rect) {
         if self.show_preview {
             let chunks = Layout::default()
@@ -361,7 +515,7 @@ impl App {
     }
 
     fn draw_results(&mut self, frame: &mut Frame, area: Rect) {
-        if self.query.trim().is_empty() {
+        if self.query.trim().is_empty() && self.results.is_empty() && !self.searching {
             self.draw_empty_help(frame, area);
             return;
         }
@@ -431,6 +585,15 @@ impl App {
             )),
             Line::from(""),
             Line::from(vec![
+                Span::styled("Press ", Style::default().fg(Color::Gray)),
+                Span::styled("Enter", Style::default().fg(Color::LightYellow)),
+                Span::styled(
+                    " to show your most recent conversations.",
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
                 Span::styled("Search for ", Style::default().fg(Color::Gray)),
                 Span::styled("a project", Style::default().fg(Color::LightYellow)),
                 Span::styled(", ", Style::default().fg(Color::Gray)),
@@ -452,24 +615,24 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Words narrow results: ",
+                    "By default the whole phrase is matched. ",
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled("SmartUp agents", Style::default().fg(Color::Gray)),
+                Span::styled("Ctrl-m", Style::default().fg(Color::Gray)),
                 Span::styled(
-                    " matches conversations containing both.",
+                    " switches phrase → words → regex.",
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("Controls  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("Tab", Style::default().fg(Color::Gray)),
-                Span::styled(" providers   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl-s/Tab", Style::default().fg(Color::Gray)),
+                Span::styled(" filters   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Ctrl-m", Style::default().fg(Color::Gray)),
+                Span::styled(" mode   ", Style::default().fg(Color::DarkGray)),
                 Span::styled("Ctrl-f", Style::default().fg(Color::Gray)),
                 Span::styled(" scope   ", Style::default().fg(Color::DarkGray)),
-                Span::styled("Ctrl-r", Style::default().fg(Color::Gray)),
-                Span::styled(" regex   ", Style::default().fg(Color::DarkGray)),
                 Span::styled("Ctrl-p", Style::default().fg(Color::Gray)),
                 Span::styled(" preview", Style::default().fg(Color::DarkGray)),
             ]),
@@ -549,7 +712,9 @@ impl App {
             }
             lines
         } else {
-            vec![Line::from("Type at least two characters to search.")]
+            vec![Line::from(
+                "Type at least two characters to search, or press Enter for recent conversations.",
+            )]
         };
         let preview = Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -565,7 +730,7 @@ impl App {
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let help = "Enter copy   Ctrl-o open   Ctrl-p preview   Tab provider   Ctrl-r regex   Ctrl-f scope   Esc quit";
+        let help = "Enter copy   Ctrl-o open   Ctrl-p preview   Ctrl-s/Tab filters   Ctrl-m mode   Ctrl-f scope   Esc quit";
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(help, Style::default().fg(Color::DarkGray)),
@@ -584,6 +749,8 @@ impl App {
             " Conversations  ⌕ waiting ".to_string()
         } else if self.searching {
             " Conversations  ⌕ searching ".to_string()
+        } else if self.query.trim().is_empty() && !self.results.is_empty() {
+            format!(" Recent Conversations  {} results ", self.results.len())
         } else if !self.results.is_empty() {
             format!(" Conversations  {} results ", self.results.len())
         } else {
@@ -605,6 +772,34 @@ fn provider_color(provider: ProviderKind) -> Color {
 
 fn rounded_block<'a>() -> Block<'a> {
     Block::default().border_set(symbols::border::ROUNDED)
+}
+
+/// A single selectable row inside the filter panel.
+fn filter_row<'a>(selected: bool, text: &str, color: Color) -> Line<'a> {
+    let marker = if selected { "› " } else { "  " };
+    let style = if selected {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color)
+    };
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(Color::Magenta)),
+        Span::styled(text.to_string(), style),
+    ])
+}
+
+/// A fixed-size rectangle centered inside `area`.
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 fn conversations_block<'a>(title: String) -> Block<'a> {

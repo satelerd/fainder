@@ -41,9 +41,14 @@ Find candidate conversations:
 ```bash
 fainder search "SmartUp migration" --json --limit 8
 fainder search "batch-download Williams" --provider codex,claude --json --limit 10
+fainder search "agents bedrock" --words --json --limit 10
 fainder search "PR|commit|deploy" --regex --json --limit 10
 fainder search "SmartUp agents" --scope metadata --json --limit 10
 ```
+
+By default the query is matched as one exact phrase (case-insensitive). Use
+`--words` to require each word independently in any order, or `--regex` for
+alternatives. A single token behaves the same in every mode.
 
 Important JSON fields:
 
@@ -95,6 +100,13 @@ Use JSON for automation:
 ```bash
 fainder inspect claude:cab15fb3 --find "PR|commit" --regex --json
 ```
+
+`inspect --json` returns previews of each turn (bodies capped, `truncated: true`)
+to keep the payload small — a broad `--find ... --json` over a long conversation
+would otherwise return 100k+ tokens and get cut off by the harness. To read the
+full text of a specific range, do **not** add `--expand`; instead note the turn
+numbers and pull that window with `fainder context --from-turn N --to-turn M`.
+Use `--expand` only for a narrow, already-bounded selection.
 
 `inspect` output uses stable turn numbers. Feed those turn numbers into `context`.
 
@@ -150,8 +162,8 @@ For cross-harness continuation, prefer `inspect` and `context` over `resume_comm
 
 ## Query Rules
 
-- Default search is case-insensitive word matching.
-- Multiple words narrow results.
+- Default search matches the whole query as one case-insensitive phrase.
+- Use `--words` to require every word independently (any order).
 - Use `--regex` for alternatives like `SmartUp|bedrock|shapeup`.
 - Use `--provider codex,claude` to reduce noise.
 - Use `--scope metadata` when full-text is too noisy.

@@ -11,7 +11,7 @@ use std::process::Command;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use model::{ProviderKind, SearchOptions};
+use model::{ProviderKind, SearchMode, SearchOptions};
 use transcript::{ContextOptions, InspectOptions, RoleFilter};
 
 #[derive(Parser)]
@@ -24,6 +24,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Show the most recently used conversations.
+    Recent {
+        /// Providers to list. Accepts comma-separated values.
+        #[arg(long, value_delimiter = ',')]
+        provider: Vec<ProviderKind>,
+        /// Print machine-readable JSON.
+        #[arg(long, conflicts_with_all = ["command_only", "copy", "open"])]
+        json: bool,
+        /// Print only the selected result's resume command.
+        #[arg(long, conflicts_with_all = ["json", "copy", "open"])]
+        command_only: bool,
+        /// Copy the selected result's resume command to the clipboard.
+        #[arg(long)]
+        copy: bool,
+        /// Execute the selected result's resume command.
+        #[arg(long)]
+        open: bool,
+        /// One-based result index used by --command-only, --copy, and --open.
+        #[arg(long, default_value_t = 1)]
+        select: usize,
+        /// Include latest messages in human-readable output.
+        #[arg(long)]
+        preview: bool,
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Search conversations without opening the TUI.
     Search {
         query: String,
@@ -31,8 +58,11 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         provider: Vec<ProviderKind>,
         /// Treat the query as a case-insensitive regular expression.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "words")]
         regex: bool,
+        /// Match each word independently (AND) instead of the exact phrase.
+        #[arg(long, conflicts_with = "regex")]
+        words: bool,
         /// Print machine-readable JSON.
         #[arg(long, conflicts_with_all = ["command_only", "copy", "open"])]
         json: bool,
@@ -163,10 +193,24 @@ fn main() -> Result<()> {
     let config = config::Config::load()?;
 
     match cli.command {
+        Some(Commands::Recent {
+            provider,
+            json,
+            command_only,
+            copy,
+            open,
+            select,
+            preview,
+            limit,
+        }) => {
+            let results = search::recent(&config, &provider, limit)?;
+            print_or_act_on_results(&results, json, command_only, copy, open, select, preview)?;
+        }
         Some(Commands::Search {
             query,
             provider,
             regex,
+            words,
             json,
             command_only,
             copy,
@@ -176,44 +220,22 @@ fn main() -> Result<()> {
             scope,
             limit,
         }) => {
+            let mode = if regex {
+                SearchMode::Regex
+            } else if words {
+                SearchMode::Words
+            } else {
+                SearchMode::Phrase
+            };
             let options = SearchOptions {
                 query,
                 providers: provider,
-                regex,
+                mode,
                 limit,
                 full_text: matches!(scope, SearchScope::All),
             };
             let results = search::search(&config, &options)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
-                return Ok(());
-            }
-
-            if command_only {
-                if let Some(result) = app::selected_result(&results, select)? {
-                    println!("{}", result.resume_command);
-                }
-                return Ok(());
-            }
-
-            if copy {
-                if let Some(result) = app::selected_result(&results, select)? {
-                    clipboard::copy(&result.resume_command)?;
-                    eprintln!("Copied: {}", result.resume_command);
-                }
-            }
-
-            if open {
-                if let Some(result) = app::selected_result(&results, select)? {
-                    Command::new("sh")
-                        .arg("-lc")
-                        .arg(&result.resume_command)
-                        .status()?;
-                }
-                return Ok(());
-            }
-
-            app::print_results(&results, preview);
+            print_or_act_on_results(&results, json, command_only, copy, open, select, preview)?;
         }
         Some(Commands::Doctor) => app::doctor(&config)?,
         Some(Commands::Inspect {
@@ -282,5 +304,47 @@ fn main() -> Result<()> {
         None => tui::run(config)?,
     }
 
+    Ok(())
+}
+
+fn print_or_act_on_results(
+    results: &[model::SearchResult],
+    json: bool,
+    command_only: bool,
+    copy: bool,
+    open: bool,
+    select: usize,
+    preview: bool,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(results)?);
+        return Ok(());
+    }
+
+    if command_only {
+        if let Some(result) = app::selected_result(results, select)? {
+            println!("{}", result.resume_command);
+        }
+        return Ok(());
+    }
+
+    if copy {
+        if let Some(result) = app::selected_result(results, select)? {
+            clipboard::copy(&result.resume_command)?;
+            eprintln!("Copied: {}", result.resume_command);
+        }
+    }
+
+    if open {
+        if let Some(result) = app::selected_result(results, select)? {
+            Command::new("sh")
+                .arg("-lc")
+                .arg(&result.resume_command)
+                .status()?;
+        }
+        return Ok(());
+    }
+
+    app::print_results(results, preview);
     Ok(())
 }

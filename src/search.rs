@@ -4,13 +4,40 @@ use anyhow::Result;
 use regex::{Regex, RegexBuilder};
 
 use crate::config::Config;
-use crate::model::{ProviderKind, SearchOptions, SearchResult, Session};
+use crate::model::{ProviderKind, SearchMode, SearchOptions, SearchResult, Session};
 use crate::providers;
+
+pub fn recent(
+    config: &Config,
+    providers: &[ProviderKind],
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
+    let providers_to_list = if providers.is_empty() {
+        ProviderKind::all()
+    } else {
+        providers.to_vec()
+    };
+    let mut results = Vec::new();
+
+    for provider in providers_to_list {
+        let sessions = match providers::recent_sessions(config, provider, limit) {
+            Ok(sessions) => sessions,
+            Err(_) => continue,
+        };
+        for session in sessions {
+            results.push(session_result(session, 0, "recent".to_string(), Vec::new()));
+        }
+    }
+
+    sort_results(&mut results);
+    results.truncate(limit.max(1));
+    Ok(results)
+}
 
 pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResult>> {
     let query = options.query.trim();
     if query.is_empty() {
-        return Ok(Vec::new());
+        return recent(config, &options.providers, options.limit);
     }
 
     let providers_to_search = if options.providers.is_empty() {
@@ -19,7 +46,7 @@ pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResu
         options.providers.clone()
     };
 
-    let matcher = Matcher::new(query, options.regex)?;
+    let matcher = Matcher::new(query, options.mode)?;
     let mut by_key: HashMap<(ProviderKind, String), SearchResult> = HashMap::new();
 
     for provider in &providers_to_search {
@@ -79,6 +106,12 @@ pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResu
     }
 
     let mut results: Vec<_> = by_key.into_values().collect();
+    sort_results(&mut results);
+    results.truncate(options.limit.max(1));
+    Ok(results)
+}
+
+fn sort_results(results: &mut [SearchResult]) {
     results.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -86,8 +119,6 @@ pub fn search(config: &Config, options: &SearchOptions) -> Result<Vec<SearchResu
             .then_with(|| a.provider.label().cmp(b.provider.label()))
             .then_with(|| a.title.cmp(&b.title))
     });
-    results.truncate(options.limit.max(1));
-    Ok(results)
 }
 
 fn upsert_result(
@@ -98,20 +129,7 @@ fn upsert_result(
     snippets: Vec<String>,
 ) {
     let key = (session.provider, session.id.clone());
-    let result = SearchResult {
-        provider: session.provider,
-        id: session.id,
-        title: session.title,
-        cwd: session.cwd,
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-        message_count: session.message_count,
-        resume_command: session.resume_command,
-        score,
-        matched_in,
-        snippets: bounded(snippets, 4),
-        latest_messages: bounded(session.latest_messages, 5),
-    };
+    let result = session_result(session, score, matched_in, snippets);
 
     match by_key.get_mut(&key) {
         Some(existing) => {
@@ -148,39 +166,66 @@ fn upsert_result(
     }
 }
 
+fn session_result(
+    session: Session,
+    score: i64,
+    matched_in: String,
+    snippets: Vec<String>,
+) -> SearchResult {
+    SearchResult {
+        provider: session.provider,
+        id: session.id,
+        title: session.title,
+        cwd: session.cwd,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+        message_count: session.message_count,
+        resume_command: session.resume_command,
+        score,
+        matched_in,
+        snippets: bounded(snippets, 4),
+        latest_messages: bounded(session.latest_messages, 5),
+    }
+}
+
 fn bounded<T>(items: Vec<T>, limit: usize) -> Vec<T> {
     items.into_iter().take(limit).collect()
 }
 
-pub struct Matcher {
-    regex: Option<Regex>,
-    terms: Vec<String>,
+pub enum Matcher {
+    /// Whole query as one case-insensitive substring.
+    Phrase(String),
+    /// All words must be present (case-insensitive, any order).
+    Words(Vec<String>),
+    /// Case-insensitive regular expression.
+    Regex(Regex),
 }
 
 impl Matcher {
-    pub fn new(query: &str, regex: bool) -> Result<Self> {
-        if regex {
-            Ok(Self {
-                regex: Some(RegexBuilder::new(query).case_insensitive(true).build()?),
-                terms: Vec::new(),
-            })
-        } else {
-            Ok(Self {
-                regex: None,
-                terms: query
+    pub fn new(query: &str, mode: SearchMode) -> Result<Self> {
+        Ok(match mode {
+            SearchMode::Regex => {
+                Self::Regex(RegexBuilder::new(query).case_insensitive(true).build()?)
+            }
+            SearchMode::Phrase => Self::Phrase(query.trim().to_lowercase()),
+            SearchMode::Words => Self::Words(
+                query
                     .split_whitespace()
                     .map(|part| part.to_lowercase())
                     .collect(),
-            })
-        }
+            ),
+        })
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        if let Some(regex) = &self.regex {
-            return regex.is_match(text);
+        match self {
+            Self::Regex(regex) => regex.is_match(text),
+            Self::Phrase(needle) => text.to_lowercase().contains(needle.as_str()),
+            Self::Words(terms) => {
+                let text = text.to_lowercase();
+                terms.iter().all(|term| text.contains(term))
+            }
         }
-        let text = text.to_lowercase();
-        self.terms.iter().all(|term| text.contains(term))
     }
 }
 
@@ -207,12 +252,21 @@ pub fn highlightless_snippet(text: &str, query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Matcher, highlightless_snippet};
+    use crate::model::SearchMode;
 
     #[test]
-    fn matcher_requires_all_terms_case_insensitive() {
-        let matcher = Matcher::new("smartup crítico", false).unwrap();
+    fn words_mode_requires_all_terms_case_insensitive() {
+        let matcher = Matcher::new("smartup crítico", SearchMode::Words).unwrap();
         assert!(matcher.is_match("SmartUp agente crítico"));
         assert!(!matcher.is_match("SmartUp agente"));
+    }
+
+    #[test]
+    fn phrase_mode_matches_literal_substring_only() {
+        let matcher = Matcher::new("SmartUp agente", SearchMode::Phrase).unwrap();
+        assert!(matcher.is_match("hablemos del SmartUp agente nuevo"));
+        // Words present but not adjacent in order must not match a phrase.
+        assert!(!matcher.is_match("agente de SmartUp"));
     }
 
     #[test]
