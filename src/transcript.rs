@@ -109,9 +109,14 @@ pub fn inspect(config: &Config, options: InspectOptions) -> Result<()> {
         // Bound each turn unless --expand is set. Full untruncated JSON of a
         // --tail/--find selection can balloon to 100k+ tokens and get cut off
         // by the calling harness; previews keep the payload agent-friendly.
-        let turns = turns
+        // Each turn also carries `full_tokens` so an agent can tell how much
+        // body was dropped and decide whether to pull it with `context`.
+        let turns: Vec<InspectTurn> = turns
             .iter()
-            .map(|turn| bound_turn(turn, options.expand, INSPECT_JSON_PREVIEW_CHARS))
+            .map(|turn| InspectTurn {
+                full_tokens: estimate_tokens(turn_body_chars(turn)),
+                turn: bound_turn(turn, options.expand, INSPECT_JSON_PREVIEW_CHARS),
+            })
             .collect();
         println!(
             "{}",
@@ -844,6 +849,13 @@ fn bound_turn(turn: &TranscriptTurn, expand: bool, max_chars: usize) -> Transcri
     next
 }
 
+/// Total characters of a turn's full body (text + tool input + tool result).
+fn turn_body_chars(turn: &TranscriptTurn) -> usize {
+    turn.text.len()
+        + turn.tool_input.as_deref().map_or(0, str::len)
+        + turn.tool_result.as_deref().map_or(0, str::len)
+}
+
 #[derive(Serialize)]
 struct InspectOutput {
     provider: ProviderKind,
@@ -853,7 +865,16 @@ struct InspectOutput {
     total_turns: usize,
     /// True when turn bodies are previews; pass --expand for full text.
     truncated: bool,
-    turns: Vec<TranscriptTurn>,
+    turns: Vec<InspectTurn>,
+}
+
+/// A turn in `inspect --json`, with an estimate of its full (untruncated)
+/// body size so agents can budget a follow-up `context` call.
+#[derive(Serialize)]
+struct InspectTurn {
+    #[serde(flatten)]
+    turn: TranscriptTurn,
+    full_tokens: usize,
 }
 
 #[derive(Serialize)]
