@@ -549,10 +549,11 @@ fn kiro_turn_from_entry(entry: &Value) -> Vec<PartialTurn> {
             let (tag, inner) = map.iter().next().expect("checked len == 1");
             kiro_turn_from_tagged(tag, inner, ts)
         }
-        // `HistoryEntry { user, assistant, request_metadata }` — the three-field
-        // struct the kiro-cli binary's own serde metadata names for one turn, so
-        // a single entry holds both sides. Split it into its two turns instead
-        // of letting the generic branch below flatten them into one `unknown`.
+        // Another plausible, UNCONFIRMED shape (see the matching comment in
+        // providers.rs): a single `history` entry holding both sides of an
+        // exchange directly as `{"user": ..., "assistant": ...}`. Split it
+        // into its two turns instead of letting the generic branch below
+        // flatten them into one `unknown`.
         Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
             let mut turns = Vec::new();
             for key in ["user", "assistant"] {
@@ -1425,9 +1426,10 @@ mod kiro_tests {
         );
     }
 
-    /// One `HistoryEntry { user, assistant, request_metadata }` has to become
-    /// two turns with distinct roles, not a single `unknown` turn holding both
-    /// sides glued together.
+    /// An unconfirmed but plausible shape: one `history` entry holding both
+    /// sides of an exchange as `{"user": ..., "assistant": ...}` has to
+    /// become two turns with distinct roles, not a single `unknown` turn
+    /// holding both sides glued together.
     #[test]
     fn splits_paired_user_assistant_entry_into_two_turns() {
         let db = TempDb::new("paired");

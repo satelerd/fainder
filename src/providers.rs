@@ -1088,12 +1088,14 @@ fn kiro_collect_tagged_message(entry: &Value, out: &mut Vec<(bool, String)>) {
                 }
             }
         }
-        // `HistoryEntry { user, assistant, request_metadata }` — the three-field
-        // struct the kiro-cli binary's own serde metadata names for one turn of
-        // `history`, so a single entry carries BOTH sides of the exchange.
-        // Without this arm the generic branch below finds no `role`/`type` key,
-        // glues prompt and response into one string, and labels all of it as the
-        // assistant.
+        // Another plausible, UNCONFIRMED shape: one `history` entry carrying
+        // both sides of an exchange directly as `{"user": ..., "assistant":
+        // ...}` (rather than one tagged message per entry, handled above).
+        // Without this arm the generic branch below finds no `role`/`type`
+        // key, glues prompt and response into one string, and labels all of
+        // it as the assistant. Like the rest of this parser, this is a guess
+        // against undocumented behavior, not something read off a real
+        // conversation or confirmed in the kiro-cli binary.
         Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
             for (key, is_user) in [("user", true), ("assistant", false)] {
                 let Some(inner) = map.get(key) else {
@@ -1751,10 +1753,10 @@ mod kiro_tests {
         assert!(session.message_count.unwrap_or(0) > 0);
     }
 
-    /// `HistoryEntry { user, assistant, request_metadata }` — the three-field
-    /// per-turn struct named in the kiro-cli binary's serde metadata. Both
-    /// sides live in one entry, so they have to come out as two messages with
-    /// the right sides, not one merged blob.
+    /// An unconfirmed but plausible shape: one `history` entry carrying both
+    /// sides of an exchange as `{"user": ..., "assistant": ...}` directly.
+    /// Both sides live in one entry, so they have to come out as two
+    /// messages with the right sides, not one merged blob.
     #[test]
     fn splits_paired_user_assistant_history_entries() {
         let db = TempDb::new("paired");
