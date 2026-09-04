@@ -23,6 +23,7 @@ pub fn sessions(config: &Config, provider: ProviderKind) -> Result<Vec<Session>>
         ProviderKind::Hermes => hermes_sessions(&config.path(provider)),
         ProviderKind::Cursor => vscode_style_sessions(&config.path(provider), provider, "cursor"),
         ProviderKind::Copilot => vscode_style_sessions(&config.path(provider), provider, "code"),
+        ProviderKind::Kiro => kiro_sessions(&config.path(provider)),
     }
 }
 
@@ -63,7 +64,8 @@ pub fn recent_sessions(
         ProviderKind::Opencode
         | ProviderKind::Hermes
         | ProviderKind::Cursor
-        | ProviderKind::Copilot => {
+        | ProviderKind::Copilot
+        | ProviderKind::Kiro => {
             let mut sessions = sessions(config, provider)?;
             sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             sessions.truncate(limit);
@@ -116,6 +118,7 @@ pub fn content_sessions(
         ProviderKind::Cursor | ProviderKind::Copilot => {
             vscode_style_content_sessions(config, provider, matcher, limit)
         }
+        ProviderKind::Kiro => kiro_content_sessions(&config.path(provider), matcher, limit),
     }
 }
 
@@ -887,6 +890,286 @@ fn vscode_content_snippets(
     Ok(snippets)
 }
 
+// Kiro CLI (kiro.dev) persists conversations locally in a SQLite database at
+// `~/Library/Application Support/kiro-cli/data.sqlite3`, confirmed via
+// `.schema` on this machine (kiro-cli 2.21.0, unauthenticated so the tables
+// are currently empty — no real conversation has been captured here).
+//
+//   conversations_v2(key, conversation_id, value, created_at, updated_at)
+//   conversations(key, value)                      -- legacy v1 store
+//
+// `kiro-cli chat --resume` ("resume the most recent conversation from this
+// directory"), `--all-cwds` ("span every workspace"), and `--session-source
+// <v1|v2>` (which store to target) are documented CLI flags that make it
+// safe to infer: `key` is the working directory a conversation belongs to,
+// `conversation_id` is the session id, and `value` is a JSON blob holding
+// the actual transcript. The exact shape of that blob is NOT confirmed
+// (no logged-in session was available to inspect one), so parsing below is
+// deliberately tolerant: it tries a likely `history` array of tagged
+// messages first, then falls back to a generic scan for readable strings
+// so a session still shows up instead of being skipped or crashing fainder.
+fn kiro_sessions(db_path: &Path) -> Result<Vec<Session>> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db_path)?;
+    let mut sessions = kiro_sessions_v2(&conn, db_path)?;
+    sessions.extend(kiro_sessions_v1(&conn, db_path)?);
+    Ok(sessions)
+}
+
+fn kiro_sessions_v2(conn: &Connection, db_path: &Path) -> Result<Vec<Session>> {
+    let Ok(mut stmt) = conn.prepare(
+        "select key, conversation_id, value, created_at, updated_at from conversations_v2",
+    ) else {
+        // Table missing: an older/newer kiro-cli schema than the one we saw.
+        return Ok(Vec::new());
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows.filter_map(|row| row.ok()) {
+        let (key, conversation_id, value, created_at, updated_at) = row;
+        sessions.push(kiro_row_to_session(
+            key,
+            Some(conversation_id),
+            &value,
+            millis(created_at),
+            millis(updated_at),
+            db_path,
+        ));
+    }
+    Ok(sessions)
+}
+
+fn kiro_sessions_v1(conn: &Connection, db_path: &Path) -> Result<Vec<Session>> {
+    let Ok(mut stmt) = conn.prepare("select key, value from conversations") else {
+        return Ok(Vec::new());
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let fallback_time = metadata_time(db_path);
+    let mut sessions = Vec::new();
+    for row in rows.filter_map(|row| row.ok()) {
+        let (key, value) = row;
+        sessions.push(kiro_row_to_session(
+            key,
+            None,
+            &value,
+            fallback_time,
+            fallback_time,
+            db_path,
+        ));
+    }
+    Ok(sessions)
+}
+
+fn kiro_row_to_session(
+    key: String,
+    conversation_id: Option<String>,
+    raw_value: &str,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+    db_path: &Path,
+) -> Session {
+    let value: Value = serde_json::from_str(raw_value).unwrap_or(Value::Null);
+    let messages = kiro_extract_messages(&value);
+    // v2 rows carry a real session id kiro-cli can jump straight back to; v1
+    // rows are one-per-directory with no id of their own, so the id we hand
+    // out is just the key and resuming has to go through the directory-scoped
+    // `--resume` instead of a (nonexistent) `--resume-id`.
+    let is_v2 = conversation_id.is_some();
+    let id = conversation_id.unwrap_or_else(|| key.clone());
+    let cwd = kiro_cwd_from_key(&key);
+    let mut title = kiro_declared_title(&value);
+    let mut latest = Vec::new();
+    let mut message_count = 0usize;
+    for (is_user, text) in &messages {
+        if is_context_message(text) {
+            continue;
+        }
+        message_count += 1;
+        if *is_user {
+            title.get_or_insert_with(|| short_title(text));
+            push_latest(&mut latest, text.clone());
+        }
+    }
+    let title = title.unwrap_or_else(|| id.clone());
+    let resume_command = match (&cwd, is_v2) {
+        (Some(cwd), true) => format!(
+            "cd {} && kiro-cli chat --resume-id {}",
+            shell_path(cwd),
+            shell(&id)
+        ),
+        (Some(cwd), false) => format!("cd {} && kiro-cli chat --resume", shell_path(cwd)),
+        (None, true) => format!("kiro-cli chat --resume-id {}", shell(&id)),
+        (None, false) => "kiro-cli chat --resume".to_string(),
+    };
+    Session {
+        provider: ProviderKind::Kiro,
+        id,
+        title,
+        cwd,
+        created_at,
+        updated_at,
+        message_count: Some(message_count),
+        source_path: Some(db_path.to_path_buf()),
+        transcript_path: Some(db_path.to_path_buf()),
+        resume_command,
+        latest_messages: latest,
+    }
+}
+
+fn kiro_declared_title(value: &Value) -> Option<String> {
+    string_field(value, "title")
+        .or_else(|| string_field(value, "summary"))
+        .or_else(|| string_field(value, "name"))
+}
+
+/// `key` is the process cwd kiro-cli was started from, which the OS always
+/// hands over already-expanded and absolute — a leading `~` never occurs in
+/// practice, and treating it as one would break `cd` under `shell_path`'s
+/// quoting (which disables tilde expansion).
+fn kiro_cwd_from_key(key: &str) -> Option<PathBuf> {
+    key.starts_with('/').then(|| PathBuf::from(key))
+}
+
+/// Best-effort extraction of `(is_user, text)` pairs from a stored Kiro
+/// conversation blob.
+///
+/// Kiro CLI shares its Rust "codewhisperer" client stack with Amazon Q
+/// Developer CLI (binary strings in `kiro-cli` reference `UserInputMessage`
+/// and `AssistantResponseMessage`), whose local conversation state has
+/// historically stored a `history` list where each turn is either a
+/// single-key tagged object (serde's default externally-tagged enum
+/// encoding, e.g. `{"UserInputMessage": {...}}`) or a `[user, assistant]`
+/// pair — both shapes are handled by `kiro_collect_tagged_message`, which
+/// recurses through arrays either way. No session was ever authenticated on
+/// this machine to confirm the shape against a live payload, so a handful of
+/// alternate top-level keys are tried too, and if none of them yield
+/// anything a generic recursive text scan is used as a last resort — an
+/// unrecognized schema should still produce something searchable instead of
+/// a silently empty conversation.
+fn kiro_extract_messages(value: &Value) -> Vec<(bool, String)> {
+    for key in ["history", "messages", "transcript", "turns", "conversation"] {
+        let Some(list) = value.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut out = Vec::new();
+        for entry in list {
+            kiro_collect_tagged_message(entry, &mut out);
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    let mut chunks = Vec::new();
+    collect_json_text(value, &mut chunks);
+    chunks.into_iter().map(|text| (false, text)).collect()
+}
+
+fn kiro_collect_tagged_message(entry: &Value, out: &mut Vec<(bool, String)>) {
+    match entry {
+        Value::Object(map) if map.len() == 1 => {
+            if let Some((tag, inner)) = map.iter().next() {
+                let tag = tag.to_ascii_lowercase();
+                let is_user = tag.contains("user") || tag.contains("prompt");
+                let text = text_from_value(inner);
+                if !text.trim().is_empty() {
+                    out.push((is_user, text));
+                }
+            }
+        }
+        Value::Object(_) => {
+            let role = entry
+                .get("role")
+                .or_else(|| entry.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let is_user =
+                role.contains("user") || role.contains("prompt") || role.contains("human");
+            let text = text_from_value(entry);
+            if !text.trim().is_empty() {
+                out.push((is_user, text));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                kiro_collect_tagged_message(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn kiro_content_sessions(
+    db_path: &Path,
+    matcher: &Matcher,
+    limit: usize,
+) -> Result<Vec<(Session, Vec<String>)>> {
+    let mut results = Vec::new();
+    for session in kiro_sessions(db_path)? {
+        let snippets = kiro_content_snippets(&session, matcher, 3)?;
+        if !snippets.is_empty() {
+            results.push((session, snippets));
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn kiro_content_snippets(
+    session: &Session,
+    matcher: &Matcher,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let Some(path) = &session.source_path else {
+        return Ok(Vec::new());
+    };
+    let conn = Connection::open(path)?;
+    let mut raw_values = Vec::new();
+    if let Ok(mut stmt) =
+        conn.prepare("select value from conversations_v2 where conversation_id = ?")
+    {
+        if let Ok(rows) = stmt.query_map([session.id.as_str()], |row| row.get::<_, String>(0)) {
+            raw_values.extend(rows.filter_map(|row| row.ok()));
+        }
+    }
+    if raw_values.is_empty() {
+        if let Ok(mut stmt) = conn.prepare("select value from conversations where key = ?") {
+            if let Ok(rows) = stmt.query_map([session.id.as_str()], |row| row.get::<_, String>(0)) {
+                raw_values.extend(rows.filter_map(|row| row.ok()));
+            }
+        }
+    }
+    let mut snippets = Vec::new();
+    for raw in raw_values {
+        for text in json_text_chunks(&raw) {
+            if is_context_message(&text) {
+                continue;
+            }
+            if matcher.is_match(&text) {
+                snippets.push(highlightless_snippet(&text, ""));
+                if snippets.len() >= limit {
+                    return Ok(snippets);
+                }
+            }
+        }
+    }
+    Ok(snippets)
+}
+
 fn workspace_path(workspace_dir: &Path) -> Option<PathBuf> {
     let raw = fs::read_to_string(workspace_dir.join("workspace.json")).ok()?;
     let value = serde_json::from_str::<Value>(&raw).ok()?;
@@ -1319,4 +1602,197 @@ fn shell(value: &str) -> String {
 
 fn shell_path(path: &Path) -> String {
     shell(&path.display().to_string())
+}
+
+#[cfg(test)]
+mod kiro_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A throwaway SQLite file mirroring `kiro-cli`'s real schema
+    /// (`conversations` / `conversations_v2`, confirmed via `.schema` on a
+    /// logged-out install). Deleted on drop.
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("fainder-kiro-test-{name}-{nanos}.sqlite3"));
+            Self { path }
+        }
+
+        fn seed(&self) -> Connection {
+            let conn = Connection::open(&self.path).expect("open temp sqlite db");
+            conn.execute_batch(
+                "create table conversations (key text primary key, value text);
+                 create table conversations_v2 (
+                    key text not null,
+                    conversation_id text not null,
+                    value text not null,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    primary key (key, conversation_id)
+                 );",
+            )
+            .expect("create kiro-cli schema");
+            conn
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn parses_tagged_history_conversation() {
+        let db = TempDb::new("history");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "conversation_id": "conv-1",
+            "history": [
+                {"User": {"content": "revisa el deploy de smartorders"}},
+                {"Assistant": {"content": "reviso los logs ahora"}},
+                {"ToolUse": {"name": "fs_read", "input": {"path": "README.md"}}},
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "/Users/minisat/SmartUp/orders",
+                "conv-1",
+                value,
+                1_700_000_000_000i64,
+                1_700_000_100_000i64
+            ],
+        )
+        .expect("insert v2 row");
+
+        let sessions = kiro_sessions(&db.path).expect("read kiro sessions");
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.provider, ProviderKind::Kiro);
+        assert_eq!(session.id, "conv-1");
+        assert_eq!(
+            session.cwd,
+            Some(PathBuf::from("/Users/minisat/SmartUp/orders"))
+        );
+        assert_eq!(session.title, "revisa el deploy de smartorders");
+        assert_eq!(session.message_count, Some(3));
+        assert!(
+            session
+                .latest_messages
+                .contains(&"revisa el deploy de smartorders".to_string())
+        );
+        assert!(session.resume_command.starts_with("cd "));
+        assert!(
+            session
+                .resume_command
+                .contains("kiro-cli chat --resume-id conv-1")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_generic_text_scan_for_unrecognized_shape() {
+        // A conversation blob that doesn't have a top-level "history" array
+        // (an undocumented/future kiro-cli schema). The parser must still
+        // surface something instead of dropping the session.
+        let db = TempDb::new("fallback");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "conversation_id": "conv-2",
+            "messages": [
+                {"speaker": "me", "body": "hola, como vamos con el pipeline"},
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "some-opaque-key",
+                "conv-2",
+                value,
+                1_700_000_000_000i64,
+                1_700_000_000_000i64
+            ],
+        )
+        .expect("insert v2 row");
+
+        let sessions = kiro_sessions(&db.path).expect("read kiro sessions");
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        // An opaque key isn't a path, so cwd stays unknown rather than guessed.
+        assert_eq!(session.cwd, None);
+        assert!(session.message_count.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn reads_legacy_v1_conversations_table() {
+        let db = TempDb::new("v1");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "history": [
+                {"User": {"content": "status del batch de smartvoc"}},
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations (key, value) values (?1, ?2)",
+            rusqlite::params!["/Users/minisat/SmartUp/smartvoc", value],
+        )
+        .expect("insert v1 row");
+
+        let sessions = kiro_sessions(&db.path).expect("read kiro sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "/Users/minisat/SmartUp/smartvoc");
+        assert_eq!(
+            sessions[0].cwd,
+            Some(PathBuf::from("/Users/minisat/SmartUp/smartvoc"))
+        );
+    }
+
+    #[test]
+    fn missing_database_returns_empty_without_error() {
+        let sessions =
+            kiro_sessions(Path::new("/nonexistent/fainder-kiro-test/data.sqlite3")).unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn content_search_matches_inside_conversation_json() {
+        let db = TempDb::new("content-search");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "conversation_id": "conv-3",
+            "history": [
+                {"User": {"content": "puedes revisar el webhook de kapso"}},
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "/Users/minisat/SmartUp/multichannel",
+                "conv-3",
+                value,
+                1_700_000_000_000i64,
+                1_700_000_000_000i64
+            ],
+        )
+        .expect("insert v2 row");
+        drop(conn);
+
+        let matcher = Matcher::new("kapso", crate::model::SearchMode::Phrase).unwrap();
+        let results = kiro_content_sessions(&db.path, &matcher, 10).expect("content search");
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].1.is_empty());
+    }
 }

@@ -767,6 +767,7 @@ fn provider_color(provider: ProviderKind) -> Color {
         ProviderKind::Hermes => Color::LightMagenta,
         ProviderKind::Cursor => Color::LightYellow,
         ProviderKind::Copilot => Color::LightBlue,
+        ProviderKind::Kiro => Color::Green,
     }
 }
 
