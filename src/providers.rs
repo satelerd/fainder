@@ -1088,14 +1088,18 @@ fn kiro_collect_tagged_message(entry: &Value, out: &mut Vec<(bool, String)>) {
                 }
             }
         }
-        // Another plausible, UNCONFIRMED shape: one `history` entry carrying
-        // both sides of an exchange directly as `{"user": ..., "assistant":
-        // ...}` (rather than one tagged message per entry, handled above).
-        // Without this arm the generic branch below finds no `role`/`type`
-        // key, glues prompt and response into one string, and labels all of
-        // it as the assistant. Like the rest of this parser, this is a guess
-        // against undocumented behavior, not something read off a real
-        // conversation or confirmed in the kiro-cli binary.
+        // `HistoryEntry { user, assistant, request_metadata }` — a real
+        // 3-field struct confirmed via `strings` on the *kiro-cli-chat*
+        // binary (`/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat`,
+        // ~1.5GB — the chat engine, not the much smaller `kiro-cli` launcher
+        // binary checked first, which doesn't contain it and led to an
+        // earlier, mistaken "unconfirmed" edit of this comment). Debug-format
+        // strings show the struct layout, not the exact serde JSON
+        // attributes, but a plain derive with no rename serializes fields
+        // under their Rust names — i.e. exactly this shape. One `history`
+        // entry carries BOTH sides of an exchange. Without this arm the
+        // generic branch below finds no `role`/`type` key, glues prompt and
+        // response into one string, and labels all of it as the assistant.
         Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
             for (key, is_user) in [("user", true), ("assistant", false)] {
                 let Some(inner) = map.get(key) else {
@@ -1753,10 +1757,10 @@ mod kiro_tests {
         assert!(session.message_count.unwrap_or(0) > 0);
     }
 
-    /// An unconfirmed but plausible shape: one `history` entry carrying both
-    /// sides of an exchange as `{"user": ..., "assistant": ...}` directly.
-    /// Both sides live in one entry, so they have to come out as two
-    /// messages with the right sides, not one merged blob.
+    /// `HistoryEntry { user, assistant, request_metadata }`, confirmed via
+    /// `strings` on the kiro-cli-chat binary. Both sides live in one entry,
+    /// so they have to come out as two messages with the right sides, not
+    /// one merged blob.
     #[test]
     fn splits_paired_user_assistant_history_entries() {
         let db = TempDb::new("paired");
