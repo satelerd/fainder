@@ -1088,6 +1088,23 @@ fn kiro_collect_tagged_message(entry: &Value, out: &mut Vec<(bool, String)>) {
                 }
             }
         }
+        // `HistoryEntry { user, assistant, request_metadata }` — the three-field
+        // struct the kiro-cli binary's own serde metadata names for one turn of
+        // `history`, so a single entry carries BOTH sides of the exchange.
+        // Without this arm the generic branch below finds no `role`/`type` key,
+        // glues prompt and response into one string, and labels all of it as the
+        // assistant.
+        Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
+            for (key, is_user) in [("user", true), ("assistant", false)] {
+                let Some(inner) = map.get(key) else {
+                    continue;
+                };
+                let text = text_from_value(inner);
+                if !text.trim().is_empty() {
+                    out.push((is_user, text));
+                }
+            }
+        }
         Value::Object(_) => {
             let role = entry
                 .get("role")
@@ -1732,6 +1749,50 @@ mod kiro_tests {
         // An opaque key isn't a path, so cwd stays unknown rather than guessed.
         assert_eq!(session.cwd, None);
         assert!(session.message_count.unwrap_or(0) > 0);
+    }
+
+    /// `HistoryEntry { user, assistant, request_metadata }` — the three-field
+    /// per-turn struct named in the kiro-cli binary's serde metadata. Both
+    /// sides live in one entry, so they have to come out as two messages with
+    /// the right sides, not one merged blob.
+    #[test]
+    fn splits_paired_user_assistant_history_entries() {
+        let db = TempDb::new("paired");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "conversation_id": "conv-paired",
+            "history": [
+                {
+                    "user": {"content": "por que fallo el batch de smartvoc"},
+                    "assistant": {"content": "se corto la transcripcion a la mitad"},
+                    "request_metadata": {"request_id": "req-1"}
+                }
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                "/Users/minisat/SmartUp/smartvoc",
+                "conv-paired",
+                value,
+                1_700_000_000_000i64,
+                1_700_000_100_000i64
+            ],
+        )
+        .expect("insert v2 row");
+
+        let sessions = kiro_sessions(&db.path).expect("read kiro sessions");
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        // Two messages out of one entry, and the title comes from the user side
+        // rather than from the assistant's answer or a merged string.
+        assert_eq!(session.message_count, Some(2));
+        assert_eq!(session.title, "por que fallo el batch de smartvoc");
+        assert_eq!(
+            session.latest_messages,
+            vec!["por que fallo el batch de smartvoc".to_string()]
+        );
     }
 
     #[test]

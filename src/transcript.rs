@@ -549,6 +549,19 @@ fn kiro_turn_from_entry(entry: &Value) -> Vec<PartialTurn> {
             let (tag, inner) = map.iter().next().expect("checked len == 1");
             kiro_turn_from_tagged(tag, inner, ts)
         }
+        // `HistoryEntry { user, assistant, request_metadata }` — the three-field
+        // struct the kiro-cli binary's own serde metadata names for one turn, so
+        // a single entry holds both sides. Split it into its two turns instead
+        // of letting the generic branch below flatten them into one `unknown`.
+        Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
+            let mut turns = Vec::new();
+            for key in ["user", "assistant"] {
+                if let Some(inner) = map.get(key) {
+                    turns.extend(kiro_turn_from_tagged(key, inner, ts));
+                }
+            }
+            turns
+        }
         Value::Object(_) => {
             let tag = entry
                 .get("role")
@@ -1410,6 +1423,40 @@ mod kiro_tests {
             turns.iter().map(|t| t.turn).collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+    }
+
+    /// One `HistoryEntry { user, assistant, request_metadata }` has to become
+    /// two turns with distinct roles, not a single `unknown` turn holding both
+    /// sides glued together.
+    #[test]
+    fn splits_paired_user_assistant_entry_into_two_turns() {
+        let db = TempDb::new("paired");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "history": [
+                {
+                    "user": {"content": "cuanto queda de creditos"},
+                    "assistant": {"content": "quedan 800 este ciclo"},
+                    "request_metadata": {"request_id": "req-1"}
+                }
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["/repo", "conv-paired", value, 1_700_000_000_000i64, 1_700_000_000_000i64],
+        )
+        .expect("insert row");
+
+        let session = kiro_session("conv-paired", &db.path);
+        let turns = load_kiro_transcript(&session).expect("load transcript");
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, TranscriptRole::User);
+        assert!(turns[0].text.contains("creditos"));
+        assert_eq!(turns[1].role, TranscriptRole::Agent);
+        assert!(turns[1].text.contains("800"));
+        assert_eq!(turns.iter().map(|t| t.turn).collect::<Vec<_>>(), vec![1, 2]);
     }
 
     #[test]
