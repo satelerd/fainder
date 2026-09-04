@@ -6,8 +6,8 @@
 
 Fainder is a tiny, local and read-only terminal app for finding and resuming your conversations.
 
-It searches Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot
-histories from one place, then returns the right resume command.
+It searches Codex, Claude Code, OpenCode, Hermes, Cursor, GitHub Copilot, and
+Kiro histories from one place, then returns the right resume command.
 Agents can also inspect a conversation by turn and print bounded chronological
 context without starting another harness or calling an LLM.
 
@@ -130,6 +130,11 @@ query, parse, and safely use Fainder.
 - OpenCode is read from OpenCode's own SQLite database.
 - Cursor and GitHub Copilot are read from VS Code-style `workspaceStorage`
   SQLite databases.
+- Kiro CLI is read from its own local SQLite database
+  (`~/Library/Application Support/kiro-cli/data.sqlite3`). The message-history
+  shape inside each conversation isn't publicly documented, so Kiro parsing
+  is deliberately tolerant and falls back to a generic text scan for
+  unrecognized shapes rather than dropping a session.
 - Fainder does not require a background service or manual indexing step.
 
 

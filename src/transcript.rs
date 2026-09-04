@@ -244,6 +244,7 @@ fn load_transcript(config: &Config, provider: ProviderKind, id: &str) -> Result<
         ProviderKind::Hermes => load_file_transcript(&session, hermes_turns_from_value)?,
         ProviderKind::Opencode => load_opencode_transcript(&session)?,
         ProviderKind::Cursor | ProviderKind::Copilot => load_vscode_transcript(&session)?,
+        ProviderKind::Kiro => load_kiro_transcript(&session)?,
     };
     Ok(Transcript { session, turns })
 }
@@ -255,7 +256,10 @@ fn find_session(config: &Config, provider: ProviderKind, id: &str) -> Result<Ses
         .find(|session| session.id == id || session.id.starts_with(id))
         .cloned()
     {
-        if session.transcript_path.is_some() || provider == ProviderKind::Opencode {
+        if session.transcript_path.is_some()
+            || provider == ProviderKind::Opencode
+            || provider == ProviderKind::Kiro
+        {
             return Ok(session);
         }
     }
@@ -265,7 +269,10 @@ fn find_session(config: &Config, provider: ProviderKind, id: &str) -> Result<Ses
         ProviderKind::Codex => find_file_by_id(&root, id, &["jsonl"])?,
         ProviderKind::Claude => find_file_by_id(&root.join("projects"), id, &["jsonl"])?,
         ProviderKind::Hermes => find_file_by_id(&root, id, &["jsonl", "json"])?,
-        ProviderKind::Opencode | ProviderKind::Cursor | ProviderKind::Copilot => None,
+        ProviderKind::Opencode
+        | ProviderKind::Cursor
+        | ProviderKind::Copilot
+        | ProviderKind::Kiro => None,
     };
 
     if let Some(path) = path {
@@ -305,6 +312,7 @@ fn fallback_session(provider: ProviderKind, id: &str, path: &Path) -> Session {
             ProviderKind::Hermes => format!("hermes --resume {}", shell(id)),
             ProviderKind::Cursor => "cursor".to_string(),
             ProviderKind::Copilot => "code".to_string(),
+            ProviderKind::Kiro => format!("kiro-cli chat --resume-id {}", shell(id)),
         },
         latest_messages: Vec::new(),
     }
@@ -437,6 +445,202 @@ fn load_vscode_transcript(session: &Session) -> Result<Vec<TranscriptTurn>> {
         turn.turn = index + 1;
     }
     Ok(turns)
+}
+
+/// Kiro CLI stores one JSON blob per conversation in a local SQLite database
+/// (see the long comment on the provider-side `kiro_sessions` in
+/// providers.rs for what's confirmed vs. inferred about that schema). The
+/// exact shape of the blob's message history is unconfirmed — no logged-in
+/// session was available on this machine to inspect a real one — so this
+/// parser tries a likely `history` array of tagged messages first and falls
+/// back to a flat scan of readable strings when that shape doesn't match,
+/// so `inspect`/`context` still show something instead of an empty
+/// transcript or a crash.
+fn load_kiro_transcript(session: &Session) -> Result<Vec<TranscriptTurn>> {
+    let path = session
+        .source_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("Kiro session has no database path"))?;
+    let conn = Connection::open(path)?;
+    let Some(raw) = kiro_raw_value(&conn, session)? else {
+        return Ok(Vec::new());
+    };
+    let value: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let entries = value
+        .get("history")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut turns = Vec::new();
+    if !entries.is_empty() {
+        for entry in &entries {
+            for partial in kiro_turn_from_entry(entry) {
+                if partial.text.trim().is_empty()
+                    && partial
+                        .tool_input
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                    && partial
+                        .tool_result
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                {
+                    continue;
+                }
+                turns.push(TranscriptTurn {
+                    turn: turns.len() + 1,
+                    role: partial.role,
+                    timestamp: partial.timestamp,
+                    text: one_line(&partial.text),
+                    tool_name: partial.tool_name,
+                    tool_input: partial.tool_input.map(|text| one_line(&text)),
+                    tool_result: partial.tool_result.map(|text| one_line(&text)),
+                });
+            }
+        }
+    } else {
+        let mut chunks = Vec::new();
+        collect_kiro_fallback_text(&value, &mut chunks);
+        for text in chunks {
+            if text.trim().is_empty() {
+                continue;
+            }
+            turns.push(TranscriptTurn {
+                turn: turns.len() + 1,
+                role: TranscriptRole::Unknown,
+                timestamp: None,
+                text: one_line(&text),
+                tool_name: None,
+                tool_input: None,
+                tool_result: None,
+            });
+        }
+    }
+    Ok(turns)
+}
+
+fn kiro_raw_value(conn: &Connection, session: &Session) -> Result<Option<String>> {
+    if let Ok(value) = conn.query_row(
+        "select value from conversations_v2 where conversation_id = ? order by updated_at desc limit 1",
+        [session.id.as_str()],
+        |row| row.get::<_, String>(0),
+    ) {
+        return Ok(Some(value));
+    }
+    if let Ok(value) = conn.query_row(
+        "select value from conversations where key = ?",
+        [session.id.as_str()],
+        |row| row.get::<_, String>(0),
+    ) {
+        return Ok(Some(value));
+    }
+    Ok(None)
+}
+
+fn kiro_turn_from_entry(entry: &Value) -> Vec<PartialTurn> {
+    let ts = timestamp(entry);
+    match entry {
+        Value::Object(map) if map.len() == 1 => {
+            let (tag, inner) = map.iter().next().expect("checked len == 1");
+            kiro_turn_from_tagged(tag, inner, ts)
+        }
+        // `HistoryEntry { user, assistant, request_metadata }` (see the
+        // matching comment in providers.rs for how this was confirmed).
+        // Split it into its two turns instead of letting the generic branch
+        // below flatten them into one `unknown`.
+        Value::Object(map) if map.contains_key("user") || map.contains_key("assistant") => {
+            let mut turns = Vec::new();
+            for key in ["user", "assistant"] {
+                if let Some(inner) = map.get(key) {
+                    turns.extend(kiro_turn_from_tagged(key, inner, ts));
+                }
+            }
+            turns
+        }
+        Value::Object(_) => {
+            let tag = entry
+                .get("role")
+                .or_else(|| entry.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            kiro_turn_from_tagged(tag, entry, ts)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn kiro_turn_from_tagged(
+    tag: &str,
+    inner: &Value,
+    timestamp: Option<DateTime<Utc>>,
+) -> Vec<PartialTurn> {
+    let tag = tag.to_ascii_lowercase();
+    if tag.contains("tool") {
+        let tool_name = string_field(inner, "name").or_else(|| string_field(inner, "tool_name"));
+        let tool_input = inner
+            .get("input")
+            .or_else(|| inner.get("arguments"))
+            .map(text_from_value);
+        let tool_result = inner
+            .get("output")
+            .or_else(|| inner.get("result"))
+            .or_else(|| inner.get("content"))
+            .map(text_from_value);
+        return vec![PartialTurn {
+            role: TranscriptRole::Tool,
+            timestamp,
+            text: String::new(),
+            tool_name,
+            tool_input,
+            tool_result,
+        }];
+    }
+    let role = if tag.contains("user") || tag.contains("prompt") || tag.contains("human") {
+        TranscriptRole::User
+    } else if tag.contains("assistant") || tag.contains("response") || tag.contains("agent") {
+        TranscriptRole::Agent
+    } else if tag.contains("system") {
+        TranscriptRole::System
+    } else {
+        TranscriptRole::Unknown
+    };
+    vec![PartialTurn {
+        role,
+        timestamp,
+        text: text_from_value(inner),
+        tool_name: None,
+        tool_input: None,
+        tool_result: None,
+    }]
+}
+
+fn collect_kiro_fallback_text(value: &Value, chunks: &mut Vec<String>) {
+    if chunks.len() >= 400 {
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            if text.split_whitespace().count() >= 2 {
+                chunks.push(text.clone());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_kiro_fallback_text(item, chunks);
+            }
+        }
+        Value::Object(map) => {
+            for value in map.values() {
+                collect_kiro_fallback_text(value, chunks);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Clone)]
@@ -1121,4 +1325,168 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 fn shell(value: &str) -> String {
     escape(value.into()).to_string()
+}
+
+#[cfg(test)]
+mod kiro_tests {
+    use super::*;
+    use crate::model::ProviderKind;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDb {
+        path: PathBuf,
+    }
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "fainder-kiro-transcript-test-{name}-{nanos}.sqlite3"
+            ));
+            Self { path }
+        }
+
+        fn seed(&self) -> Connection {
+            let conn = Connection::open(&self.path).expect("open temp sqlite db");
+            conn.execute_batch(
+                "create table conversations (key text primary key, value text);
+                 create table conversations_v2 (
+                    key text not null,
+                    conversation_id text not null,
+                    value text not null,
+                    created_at integer not null,
+                    updated_at integer not null,
+                    primary key (key, conversation_id)
+                 );",
+            )
+            .expect("create kiro-cli schema");
+            conn
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    fn kiro_session(id: &str, db_path: &Path) -> Session {
+        Session {
+            provider: ProviderKind::Kiro,
+            id: id.to_string(),
+            title: id.to_string(),
+            cwd: None,
+            created_at: None,
+            updated_at: None,
+            message_count: None,
+            source_path: Some(db_path.to_path_buf()),
+            transcript_path: Some(db_path.to_path_buf()),
+            resume_command: format!("kiro-cli chat --resume-id {id}"),
+            latest_messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn normalizes_tagged_history_into_roles_and_tool_calls() {
+        let db = TempDb::new("roles");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "history": [
+                {"User": {"content": "revisa el pipeline de smartvoc"}},
+                {"ToolUse": {"name": "fs_read", "input": {"path": "README.md"}, "output": "contenido leido"}},
+                {"Assistant": {"content": "el pipeline esta corriendo bien"}},
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["/repo", "conv-turns", value, 1_700_000_000_000i64, 1_700_000_000_000i64],
+        )
+        .expect("insert row");
+
+        let session = kiro_session("conv-turns", &db.path);
+        let turns = load_kiro_transcript(&session).expect("load transcript");
+
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].role, TranscriptRole::User);
+        assert!(turns[0].text.contains("smartvoc"));
+        assert_eq!(turns[1].role, TranscriptRole::Tool);
+        assert_eq!(turns[1].tool_name.as_deref(), Some("fs_read"));
+        assert!(turns[1].tool_result.is_some());
+        assert_eq!(turns[2].role, TranscriptRole::Agent);
+        assert!(turns[2].text.contains("pipeline"));
+        // Turns are renumbered sequentially from 1.
+        assert_eq!(
+            turns.iter().map(|t| t.turn).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// `HistoryEntry { user, assistant, request_metadata }` has to become two
+    /// turns with distinct roles, not a single `unknown` turn holding both
+    /// sides glued together.
+    #[test]
+    fn splits_paired_user_assistant_entry_into_two_turns() {
+        let db = TempDb::new("paired");
+        let conn = db.seed();
+        let value = serde_json::json!({
+            "history": [
+                {
+                    "user": {"content": "cuanto queda de creditos"},
+                    "assistant": {"content": "quedan 800 este ciclo"},
+                    "request_metadata": {"request_id": "req-1"}
+                }
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["/repo", "conv-paired", value, 1_700_000_000_000i64, 1_700_000_000_000i64],
+        )
+        .expect("insert row");
+
+        let session = kiro_session("conv-paired", &db.path);
+        let turns = load_kiro_transcript(&session).expect("load transcript");
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, TranscriptRole::User);
+        assert!(turns[0].text.contains("creditos"));
+        assert_eq!(turns[1].role, TranscriptRole::Agent);
+        assert!(turns[1].text.contains("800"));
+        assert_eq!(turns.iter().map(|t| t.turn).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn falls_back_to_unknown_role_flat_scan_for_unrecognized_shape() {
+        let db = TempDb::new("fallback");
+        let conn = db.seed();
+        // No "history" array: an undocumented/future schema.
+        let value = serde_json::json!({
+            "log": [{"who": "human", "said": "hola, revisamos el deploy hoy"}]
+        })
+        .to_string();
+        conn.execute(
+            "insert into conversations_v2 (key, conversation_id, value, created_at, updated_at) values (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["/repo", "conv-fallback", value, 1_700_000_000_000i64, 1_700_000_000_000i64],
+        )
+        .expect("insert row");
+
+        let session = kiro_session("conv-fallback", &db.path);
+        let turns = load_kiro_transcript(&session).expect("load transcript");
+
+        assert!(!turns.is_empty());
+        assert!(turns.iter().all(|t| t.role == TranscriptRole::Unknown));
+    }
+
+    #[test]
+    fn missing_conversation_returns_empty_transcript() {
+        let db = TempDb::new("missing");
+        let _conn = db.seed();
+        let session = kiro_session("does-not-exist", &db.path);
+        let turns = load_kiro_transcript(&session).expect("load transcript");
+        assert!(turns.is_empty());
+    }
 }

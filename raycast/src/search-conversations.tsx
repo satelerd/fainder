@@ -17,7 +17,8 @@ type Provider =
   | "opencode"
   | "hermes"
   | "cursor"
-  | "copilot";
+  | "copilot"
+  | "kiro";
 type Scope = "all" | "metadata";
 
 type SearchResult = {
@@ -376,6 +377,7 @@ function labelProvider(provider: Exclude<Provider, "all">): string {
     hermes: "Hermes",
     cursor: "Cursor",
     copilot: "Copilot",
+    kiro: "Kiro",
   };
   return labels[provider];
 }
@@ -388,12 +390,13 @@ function providerColor(provider: Exclude<Provider, "all">): Color {
     hermes: Color.Purple,
     cursor: Color.Yellow,
     copilot: Color.PrimaryText,
+    kiro: Color.Magenta,
   };
   return colors[provider];
 }
 
 function providers(): Exclude<Provider, "all">[] {
-  return ["codex", "claude", "opencode", "hermes", "cursor", "copilot"];
+  return ["codex", "claude", "opencode", "hermes", "cursor", "copilot", "kiro"];
 }
 
 function basename(path: string): string {

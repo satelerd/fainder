@@ -15,11 +15,12 @@ pub enum ProviderKind {
     Hermes,
     Cursor,
     Copilot,
+    Kiro,
 }
 
 impl ProviderKind {
     /// Number of provider variants (keep in sync with `all`).
-    pub const COUNT: usize = 6;
+    pub const COUNT: usize = 7;
 
     pub fn all() -> Vec<Self> {
         vec![
@@ -29,6 +30,7 @@ impl ProviderKind {
             Self::Hermes,
             Self::Cursor,
             Self::Copilot,
+            Self::Kiro,
         ]
     }
 
@@ -40,6 +42,7 @@ impl ProviderKind {
             Self::Hermes => "hermes",
             Self::Cursor => "cursor",
             Self::Copilot => "copilot",
+            Self::Kiro => "kiro",
         }
     }
 }
@@ -61,6 +64,7 @@ impl FromStr for ProviderKind {
             "hermes" => Ok(Self::Hermes),
             "cursor" => Ok(Self::Cursor),
             "copilot" | "github-copilot" | "vscode-copilot" => Ok(Self::Copilot),
+            "kiro" | "kiro-cli" => Ok(Self::Kiro),
             _ => Err(anyhow!("unknown provider: {value}")),
         }
     }

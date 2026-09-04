@@ -37,6 +37,10 @@ impl Config {
             ProviderKind::Copilot,
             home.join("Library/Application Support/Code/User/workspaceStorage"),
         );
+        paths.insert(
+            ProviderKind::Kiro,
+            home.join("Library/Application Support/kiro-cli/data.sqlite3"),
+        );
 
         let config_path = dirs::config_dir()
             .unwrap_or_else(|| home.join(".config"))

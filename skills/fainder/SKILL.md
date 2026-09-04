@@ -1,6 +1,6 @@
 ---
 name: fainder
-description: Use Fainder to search, inspect, and contextualize local AI agent conversations across Codex, Claude Code, OpenCode, Hermes, Cursor, and GitHub Copilot. Trigger when an agent needs to recover prior work, find a lost thread, inspect a transcript by role or turn, produce bounded chronological context from another harness, locate resume commands, or guide installation/update with Homebrew.
+description: Use Fainder to search, inspect, and contextualize local AI agent conversations across Codex, Claude Code, OpenCode, Hermes, Cursor, GitHub Copilot, and Kiro. Trigger when an agent needs to recover prior work, find a lost thread, inspect a transcript by role or turn, produce bounded chronological context from another harness, locate resume commands, or guide installation/update with Homebrew.
 ---
 
 # Fainder
@@ -23,6 +23,7 @@ Supported providers:
 - `hermes`
 - `cursor`
 - `copilot`
+- `kiro`
 
 ## Agent Workflow
 
@@ -184,5 +185,6 @@ opencode = "~/.local/share/opencode/opencode.db"
 hermes = "~/.hermes/sessions"
 cursor = "~/Library/Application Support/Cursor/User/workspaceStorage"
 copilot = "~/Library/Application Support/Code/User/workspaceStorage"
+kiro = "~/Library/Application Support/kiro-cli/data.sqlite3"
 ```
 
