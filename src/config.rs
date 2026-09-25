@@ -11,11 +11,36 @@ use crate::model::ProviderKind;
 pub struct Config {
     pub home: PathBuf,
     pub paths: HashMap<ProviderKind, PathBuf>,
+    pub team: TeamConfig,
+}
+
+/// `[team]` section: where `fainder team` sends queries. The key is read from
+/// an environment variable, never from this file, so the config can be shared
+/// without leaking the credential.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TeamConfig {
+    pub url: Option<String>,
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+}
+
+impl Default for TeamConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            api_key_env: default_api_key_env(),
+        }
+    }
+}
+
+fn default_api_key_env() -> String {
+    "FAINDER_TEAM_KEY".to_string()
 }
 
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     paths: Option<HashMap<String, PathBuf>>,
+    team: Option<TeamConfig>,
 }
 
 impl Config {
@@ -42,6 +67,7 @@ impl Config {
             home.join("Library/Application Support/kiro-cli/data.sqlite3"),
         );
 
+        let mut team = TeamConfig::default();
         let config_path = dirs::config_dir()
             .unwrap_or_else(|| home.join(".config"))
             .join("fainder/config.toml");
@@ -57,9 +83,12 @@ impl Config {
                     }
                 }
             }
+            if let Some(parsed_team) = parsed.team {
+                team = parsed_team;
+            }
         }
 
-        Ok(Self { home, paths })
+        Ok(Self { home, paths, team })
     }
 
     pub fn path(&self, provider: ProviderKind) -> PathBuf {
