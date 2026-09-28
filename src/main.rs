@@ -194,6 +194,18 @@ enum TeamCommands {
         /// Only this dev's sessions.
         #[arg(long)]
         dev: Option<String>,
+        /// Only this harness, e.g. claude or codex.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Only sessions from this machine (the HMAC a search result shows).
+        #[arg(long)]
+        machine: Option<String>,
+        /// Only sessions whose primary or secondary repo is owner/repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Only sessions with this local project folder name.
+        #[arg(long)]
+        project: Option<String>,
         /// Only sessions linked to this client (client hub id or slug).
         #[arg(long)]
         client: Option<String>,
@@ -203,12 +215,12 @@ enum TeamCommands {
         /// Only sessions linked to this PR (OWNER/REPO#N or URL).
         #[arg(long)]
         pr: Option<String>,
-        /// Only this harness, e.g. claude or codex.
-        #[arg(long)]
-        harness: Option<String>,
         /// Only sessions active on or after this date (YYYY-MM-DD).
         #[arg(long)]
         since: Option<String>,
+        /// Only sessions active on or before this date (YYYY-MM-DD).
+        #[arg(long)]
+        until: Option<String>,
         /// Maximum number of results.
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -220,6 +232,10 @@ enum TeamCommands {
     Context {
         /// Session reference formatted as dev:harness:id.
         session: String,
+        /// Read a subagent's turns instead of the main session (the `key` a
+        /// search result shows).
+        #[arg(long)]
+        key: Option<String>,
         /// First turn to include.
         #[arg(long)]
         from_turn: Option<usize>,
@@ -383,11 +399,15 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
             regex,
             words,
             dev,
+            harness,
+            machine,
+            repo,
+            project,
             client: client_filter,
             task,
             pr,
-            harness,
             since,
+            until,
             limit,
             json,
         } => {
@@ -402,11 +422,15 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
                 query,
                 mode: Some(mode),
                 dev,
+                harness,
+                machine,
+                repo,
+                project,
                 client: client_filter,
                 task,
                 pr,
-                harness,
                 since,
+                until,
                 limit,
             })?;
             if json {
@@ -417,6 +441,7 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
         }
         TeamCommands::Context {
             session,
+            key,
             from_turn,
             to_turn,
             around,
@@ -426,6 +451,7 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
         } => {
             let response = client.turns(&team::TeamContextOptions {
                 session_ref: session,
+                key,
                 from_turn,
                 to_turn,
                 around,
