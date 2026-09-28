@@ -6,16 +6,22 @@
 //! has no `resume_command`. fainder never talks to the index database; admin
 //! owns auth (personal operator keys), scopes and audit.
 //!
-//! Wire contract (JSON), served by admin:
+//! Wire contract (JSON), served by admin. Canonical path is
+//! `/api/manage/dev-insights/*`; `/api/dev-insights/*` (used below) is an
+//! alias over the same handlers. Every response is wrapped in the Manage
+//! API's envelope, `{"success": true, "data": {...}}`; only `data` is shown:
 //!
 //! ```text
-//! GET /api/dev-insights/search?q&mode&dev&client&task&pr&harness&since&limit
-//!   -> { "results": [SearchHit] }
-//! GET /api/dev-insights/sessions/{dev}:{harness}:{native_id}/turns?from&to[&tools=1]
-//!   -> { "session": SessionInfo, "turns": [Turn] }
+//! GET /api/dev-insights/search?q&mode&dev&harness&machine&repo&project&client&task&pr&since&until&limit
+//!   -> { "results": [SearchHit], "total": N }
+//! GET /api/dev-insights/sessions/{dev}:{harness}:{native_id}/turns?from&to&key[&tools=1]
+//!   -> { "ref": ..., "key": ..., "title": ..., "turns": [Turn] }
 //! ```
 //!
-//! Design: SmartUp-Chile/conversations-context INDEX.md, section 6.
+//! Design: SmartUp-Chile/conversations-context INDEX.md, section 6. Contract
+//! source of truth: SmartUp-Chile/admin#231, cross-checked against
+//! SmartUp-Chile/plugins `dev-insights/skills/team-search/references/contract.md`
+//! (PR #84) — if the two disagree, fix one and note it there.
 
 use std::time::Duration;
 
@@ -30,17 +36,24 @@ pub struct TeamSearchOptions {
     pub query: String,
     pub mode: Option<SearchMode>,
     pub dev: Option<String>,
+    pub harness: Option<String>,
+    pub machine: Option<String>,
+    pub repo: Option<String>,
+    pub project: Option<String>,
     pub client: Option<String>,
     pub task: Option<String>,
     pub pr: Option<String>,
-    pub harness: Option<String>,
     pub since: Option<String>,
+    pub until: Option<String>,
     pub limit: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct TeamContextOptions {
     pub session_ref: String,
+    /// Selects a subagent's turns (the `key` of a search result); the main
+    /// session is used when absent.
+    pub key: Option<String>,
     pub from_turn: Option<usize>,
     pub to_turn: Option<usize>,
     pub around: Option<usize>,
@@ -53,14 +66,22 @@ pub struct Link {
     pub kind: String,
     #[serde(rename = "ref")]
     pub reference: String,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub is_primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchHit {
     /// `{dev}:{harness}:{native_id}`, the argument `team context` takes.
+    #[serde(rename = "ref")]
     pub session: String,
+    /// The `session_key`; pass as `--key` to `team context` to read a subagent.
+    pub key: String,
     pub dev: String,
     pub harness: String,
+    pub native_id: String,
     #[serde(default)]
     pub subagent: bool,
     #[serde(default)]
@@ -68,9 +89,15 @@ pub struct SearchHit {
     #[serde(default)]
     pub project_name: Option<String>,
     #[serde(default)]
-    pub client: Option<String>,
+    pub git_remote: Option<String>,
     #[serde(default)]
-    pub last_at: Option<String>,
+    pub git_remotes: Vec<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub first: Option<String>,
+    #[serde(default)]
+    pub last: Option<String>,
     #[serde(default)]
     pub score: f64,
     /// Turn number of the best match, for `team context --around`.
@@ -83,34 +110,50 @@ pub struct SearchHit {
     pub links: Vec<Link>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SessionInfo {
-    pub session: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub project_name: Option<String>,
-    #[serde(default)]
-    pub links: Vec<Link>,
+impl SearchHit {
+    /// The client this session is linked to. The API has no top-level `client`
+    /// field; it travels as a `links` entry (`kind == "client"`, at most one
+    /// `is_primary`).
+    pub fn client(&self) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|link| link.kind == "client" && link.is_primary)
+            .or_else(|| self.links.iter().find(|link| link.kind == "client"))
+            .map(|link| link.reference.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Turn {
-    pub n: usize,
+    pub turn: usize,
     pub role: String,
     #[serde(default)]
-    pub at: Option<String>,
-    pub body: String,
+    pub ts: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct SearchResponse {
+struct Envelope<T> {
+    data: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchData {
     results: Vec<SearchHit>,
+    #[serde(default)]
+    #[allow(dead_code)] // not surfaced yet; kept so the shape matches the contract
+    total: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnsResponse {
-    pub session: SessionInfo,
+    #[serde(rename = "ref")]
+    pub session_ref: String,
+    pub key: String,
+    #[serde(default)]
+    pub title: Option<String>,
     pub turns: Vec<Turn>,
 }
 
@@ -159,18 +202,22 @@ impl TeamClient {
         }
         for (key, value) in [
             ("dev", &options.dev),
+            ("harness", &options.harness),
+            ("machine", &options.machine),
+            ("repo", &options.repo),
+            ("project", &options.project),
             ("client", &options.client),
             ("task", &options.task),
             ("pr", &options.pr),
-            ("harness", &options.harness),
             ("since", &options.since),
+            ("until", &options.until),
         ] {
             if let Some(value) = value {
                 request = request.query(key, value);
             }
         }
-        let response: SearchResponse = read_json(request.call())?;
-        Ok(response.results)
+        let data: SearchData = read_data(request.call())?;
+        Ok(data.results)
     }
 
     pub fn turns(&self, options: &TeamContextOptions) -> Result<TurnsResponse> {
@@ -189,10 +236,13 @@ impl TeamClient {
         if let Some(to) = to {
             request = request.query("to", to.to_string());
         }
+        if let Some(key) = &options.key {
+            request = request.query("key", key);
+        }
         if options.tools {
             request = request.query("tools", "1");
         }
-        read_json(request.call())
+        read_data(request.call())
     }
 }
 
@@ -202,6 +252,15 @@ fn mode_param(mode: SearchMode) -> &'static str {
         SearchMode::Words => "words",
         SearchMode::Regex => "regex",
     }
+}
+
+/// Reads the envelope and returns `data`; the server never sends a 2xx with
+/// `success: false`, so status alone tells success from error.
+fn read_data<T: serde::de::DeserializeOwned>(
+    result: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<T> {
+    let envelope: Envelope<T> = read_json(result)?;
+    Ok(envelope.data)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(
@@ -267,13 +326,13 @@ pub fn print_hits(hits: &[SearchHit]) {
         let subagent = if hit.subagent { " [subagent]" } else { "" };
         println!("{}. {}{}", index + 1, title, subagent);
         let mut meta = vec![hit.session.clone()];
-        if let Some(client) = &hit.client {
+        if let Some(client) = hit.client() {
             meta.push(format!("client {client}"));
         }
         if let Some(project) = &hit.project_name {
             meta.push(format!("project {project}"));
         }
-        if let Some(last) = &hit.last_at {
+        if let Some(last) = &hit.last {
             meta.push(last.chars().take(10).collect());
         }
         println!("   {}", meta.join(" · "));
@@ -303,12 +362,17 @@ pub fn print_hits(hits: &[SearchHit]) {
 }
 
 pub fn print_turns(response: &TurnsResponse) {
-    let title = response.session.title.as_deref().unwrap_or("(untitled)");
-    println!("# {} ({})\n", title, response.session.session);
+    let title = response.title.as_deref().unwrap_or("(untitled)");
+    println!("# {} ({})\n", title, response.session_ref);
     for turn in &response.turns {
-        let at = turn.at.as_deref().unwrap_or("");
-        println!("## [{}] {} {}\n", turn.n, turn.role, at);
-        println!("{}\n", turn.body.trim_end());
+        let ts = turn.ts.as_deref().unwrap_or("");
+        let tool = turn
+            .tool_name
+            .as_deref()
+            .map(|name| format!(" [{name}]"))
+            .unwrap_or_default();
+        println!("## [{}] {}{} {}\n", turn.turn, turn.role, tool, ts);
+        println!("{}\n", turn.text.trim_end());
     }
 }
 
@@ -347,7 +411,7 @@ mod tests {
         (url, rx)
     }
 
-    const HIT: &str = r#"{"results":[{"session":"sat:claude:e52f2113","dev":"sat","harness":"claude","subagent":false,"title":"Remedición J&A","project_name":"smartorders","client":"f614a811","last_at":"2026-09-17T18:52:00Z","score":0.8,"turn":142,"role":"user","snippet":"el escalation_task_id queda nulo","links":[{"kind":"shapeup_task","ref":"AUTO-03"},{"kind":"client","ref":"f614a811"}]}]}"#;
+    const HIT: &str = r#"{"success":true,"data":{"results":[{"ref":"sat:claude:e52f2113","key":"9f2c...","dev":"sat","harness":"claude","native_id":"e52f2113","subagent":false,"title":"Remedición J&A","project_name":"smartorders","git_remote":"SmartUp-Chile/smartorders","git_remotes":["SmartUp-Chile/smartorders"],"machine":"0123456789abcdef","first":"2026-09-17T18:40:00Z","last":"2026-09-17T18:52:00Z","score":0.8,"turn":142,"role":"user","snippet":"el escalation_task_id queda nulo","links":[{"kind":"shapeup_task","ref":"AUTO-03","origin":"detected","is_primary":false},{"kind":"client","ref":"f614a811","origin":"dev","is_primary":true}]}],"total":1}}"#;
 
     #[test]
     fn search_sends_key_filters_and_parses_hits() {
@@ -359,6 +423,8 @@ mod tests {
                 mode: Some(SearchMode::Regex),
                 client: Some("pull-a-part".into()),
                 task: Some("AUTO-03".into()),
+                repo: Some("SmartUp-Chile/smartorders".into()),
+                machine: Some("0123456789abcdef".into()),
                 limit: 5,
                 ..Default::default()
             })
@@ -371,24 +437,29 @@ mod tests {
         assert!(request_line.contains("mode=regex"));
         assert!(request_line.contains("client=pull-a-part"));
         assert!(request_line.contains("task=AUTO-03"));
+        assert!(request_line.contains("repo=SmartUp-Chile"));
+        assert!(request_line.contains("machine=0123456789abcdef"));
         assert!(request_line.contains("limit=5"));
         assert!(!request_line.contains("dev="));
         assert!(head.to_ascii_lowercase().contains("x-api-key: op_key"));
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session, "sat:claude:e52f2113");
+        assert_eq!(hits[0].key, "9f2c...");
         assert_eq!(hits[0].turn, 142);
-        assert_eq!(hits[0].links[0].reference, "AUTO-03");
+        assert_eq!(hits[0].client(), Some("f614a811"));
+        assert_eq!(hits[0].git_remotes, vec!["SmartUp-Chile/smartorders".to_string()]);
     }
 
     #[test]
-    fn turns_requests_a_window_around_a_turn() {
-        let body = r#"{"session":{"session":"sat:claude:e52f2113","title":"t","links":[]},"turns":[{"n":140,"role":"user","body":"hola"}]}"#;
+    fn turns_requests_a_window_around_a_turn_and_can_select_a_subagent() {
+        let body = r#"{"success":true,"data":{"ref":"sat:claude:e52f2113","key":"9f2c...","title":"t","turns":[{"turn":140,"role":"user","ts":"2026-09-17T18:40:00Z","tool_name":null,"text":"hola"}]}}"#;
         let (url, head) = serve_once("200 OK", body);
         let client = TeamClient::new(url, "k".into());
         let response = client
             .turns(&TeamContextOptions {
                 session_ref: "sat:claude:e52f2113".into(),
+                key: Some("9f2c...".into()),
                 from_turn: None,
                 to_turn: None,
                 around: Some(142),
@@ -401,8 +472,9 @@ mod tests {
         assert!(request_line.starts_with("GET /api/dev-insights/sessions/sat:claude:e52f2113/turns?"));
         assert!(request_line.contains("from=137"));
         assert!(request_line.contains("to=147"));
+        assert!(request_line.contains("key=9f2c"));
         assert!(request_line.contains("tools=1"));
-        assert_eq!(response.turns[0].body, "hola");
+        assert_eq!(response.turns[0].text, "hola");
     }
 
     #[test]
@@ -432,6 +504,7 @@ mod tests {
     fn around_and_explicit_range_are_exclusive() {
         let options = TeamContextOptions {
             session_ref: "a:b:c".into(),
+            key: None,
             from_turn: Some(1),
             to_turn: None,
             around: Some(10),
@@ -445,5 +518,17 @@ mod tests {
             ..options
         };
         assert_eq!(turn_window(&options).unwrap(), (Some(0), Some(5)));
+    }
+
+    #[test]
+    fn client_falls_back_to_any_client_link_when_none_is_primary() {
+        let mut hit: SearchHit = {
+            let data: serde_json::Value = serde_json::from_str(HIT).unwrap();
+            serde_json::from_value(data["data"]["results"][0].clone()).unwrap()
+        };
+        hit.links.iter_mut().for_each(|l| l.is_primary = false);
+        assert_eq!(hit.client(), Some("f614a811"));
+        hit.links.retain(|l| l.kind != "client");
+        assert_eq!(hit.client(), None);
     }
 }
