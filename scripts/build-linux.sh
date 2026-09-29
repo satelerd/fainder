@@ -13,6 +13,7 @@ IMAGE="${FAINDER_LINUX_IMAGE:-rust:1-bullseye}"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "${ROOT}/Cargo.toml" | head -1)"
 DIST="${ROOT}/dist"
 mkdir -p "${DIST}"
+built=()
 
 for platform in linux/amd64 linux/arm64; do
   case "${platform}" in
@@ -34,9 +35,10 @@ for platform in linux/amd64 linux/arm64; do
       tar -C /target/release -czf /dist/${name}.tar.gz fainder
     "
   (cd "${DIST}" && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+  built+=("${DIST}/${name}.tar.gz" "${DIST}/${name}.tar.gz.sha256")
 done
 
-ls -1 "${DIST}"/fainder-*-linux-gnu.tar.gz*
+printf '%s\n' "${built[@]}"
 
 if [[ "${1:-}" == "--upload" ]]; then
   tag="${2:?usage: scripts/build-linux.sh --upload vX.Y.Z}"
@@ -44,5 +46,5 @@ if [[ "${1:-}" == "--upload" ]]; then
     echo "Cargo.toml says ${VERSION}, refusing to upload to ${tag}" >&2
     exit 1
   fi
-  gh release upload "${tag}" --clobber "${DIST}"/fainder-*-linux-gnu.tar.gz*
+  gh release upload "${tag}" --clobber "${built[@]}"
 fi
