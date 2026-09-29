@@ -392,7 +392,7 @@ fn main() -> Result<()> {
 }
 
 fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
-    let client = team::TeamClient::from_config(&config.team)?;
+    let client = team::TeamClient::from_config(&config.team, &config.config_path)?;
     match command {
         TeamCommands::Search {
             query,

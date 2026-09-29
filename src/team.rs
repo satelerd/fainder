@@ -23,6 +23,7 @@
 //! SmartUp-Chile/plugins `dev-insights/skills/team-search/references/contract.md`
 //! (PR #84) — if the two disagree, fix one and note it there.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -164,9 +165,12 @@ pub struct TeamClient {
 }
 
 impl TeamClient {
-    pub fn from_config(config: &TeamConfig) -> Result<Self> {
+    pub fn from_config(config: &TeamConfig, config_path: &Path) -> Result<Self> {
         let base_url = config.url.clone().ok_or_else(|| {
-            anyhow!("team mode is not configured: add [team] url = \"https://admin.smartup.lat\" to ~/.config/fainder/config.toml")
+            anyhow!(
+                "team mode is not configured: add [team] url = \"https://admin.smartup.lat\" to {}",
+                config_path.display()
+            )
         })?;
         let api_key = std::env::var(&config.api_key_env).ok().filter(|k| !k.trim().is_empty()).ok_or_else(|| {
             anyhow!(

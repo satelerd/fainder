@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -12,6 +12,7 @@ pub struct Config {
     pub home: PathBuf,
     pub paths: HashMap<ProviderKind, PathBuf>,
     pub team: TeamConfig,
+    pub config_path: PathBuf,
 }
 
 /// `[team]` section: where `fainder team` sends queries. The key is read from
@@ -68,9 +69,7 @@ impl Config {
         );
 
         let mut team = TeamConfig::default();
-        let config_path = dirs::config_dir()
-            .unwrap_or_else(|| home.join(".config"))
-            .join("fainder/config.toml");
+        let config_path = config_path(&home);
         if config_path.exists() {
             let raw = fs::read_to_string(&config_path)
                 .with_context(|| format!("failed to read {}", config_path.display()))?;
@@ -88,7 +87,12 @@ impl Config {
             }
         }
 
-        Ok(Self { home, paths, team })
+        Ok(Self {
+            home,
+            paths,
+            team,
+            config_path,
+        })
     }
 
     pub fn path(&self, provider: ProviderKind) -> PathBuf {
@@ -97,6 +101,25 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| self.home.clone())
     }
+}
+
+/// `$XDG_CONFIG_HOME/fainder/config.toml`, else `~/.config/fainder/config.toml`,
+/// which is what the docs promise on every OS. On macOS `dirs::config_dir()` is
+/// `~/Library/Application Support`, so that location is only a fallback for
+/// configs that already live there.
+pub fn config_path(home: &Path) -> PathBuf {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
+        .join("fainder/config.toml");
+    if xdg.exists() {
+        return xdg;
+    }
+    dirs::config_dir()
+        .map(|dir| dir.join("fainder/config.toml"))
+        .filter(|legacy| legacy.exists())
+        .unwrap_or(xdg)
 }
 
 fn expand_tilde(path: PathBuf, home: &PathBuf) -> PathBuf {
