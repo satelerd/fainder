@@ -28,7 +28,7 @@ brew upgrade fainder
 On Linux (x86_64 or aarch64), see [docs/LINUX.md](docs/LINUX.md):
 
 ```bash
-curl -fsSL "https://github.com/satelerd/fainder/releases/latest/download/fainder-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C ~/.local/bin
+mkdir -p ~/.local/bin && curl -fsSL "https://github.com/satelerd/fainder/releases/latest/download/fainder-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C ~/.local/bin
 ```
 
 ## Quick Start

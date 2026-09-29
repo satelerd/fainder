@@ -18,7 +18,7 @@ fainder doctor
 On Linux, install the prebuilt binary (see `docs/LINUX.md` in the repo):
 
 ```bash
-curl -fsSL "https://github.com/satelerd/fainder/releases/latest/download/fainder-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C ~/.local/bin
+mkdir -p ~/.local/bin && curl -fsSL "https://github.com/satelerd/fainder/releases/latest/download/fainder-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C ~/.local/bin
 ```
 
 Supported providers:
