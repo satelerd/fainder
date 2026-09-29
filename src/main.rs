@@ -412,7 +412,7 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
             json,
         } => {
             let (query, mode) = team::resolve_search_mode(&query, regex, words);
-            let hits = client.search(&team::TeamSearchOptions {
+            let page = client.search(&team::TeamSearchOptions {
                 query,
                 mode: Some(mode),
                 dev,
@@ -428,9 +428,9 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
                 limit,
             })?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&hits)?);
+                println!("{}", serde_json::to_string_pretty(&page.results)?);
             } else {
-                team::print_hits(&hits);
+                team::print_hits(&page.results, page.total);
             }
         }
         TeamCommands::Context {

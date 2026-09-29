@@ -141,11 +141,11 @@ struct Envelope<T> {
 }
 
 #[derive(Debug, Deserialize)]
-struct SearchData {
-    results: Vec<SearchHit>,
+pub struct SearchData {
+    pub results: Vec<SearchHit>,
+    /// Sessions matching before `limit` was applied.
     #[serde(default)]
-    #[allow(dead_code)] // not surfaced yet; kept so the shape matches the contract
-    total: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,7 +194,7 @@ impl TeamClient {
         }
     }
 
-    pub fn search(&self, options: &TeamSearchOptions) -> Result<Vec<SearchHit>> {
+    pub fn search(&self, options: &TeamSearchOptions) -> Result<SearchData> {
         let mut request = self
             .agent
             .get(format!("{}/api/dev-insights/search", self.base_url))
@@ -220,8 +220,7 @@ impl TeamClient {
                 request = request.query(key, value);
             }
         }
-        let data: SearchData = read_data(request.call())?;
-        Ok(data.results)
+        read_data(request.call())
     }
 
     pub fn turns(&self, options: &TeamContextOptions) -> Result<TurnsResponse> {
@@ -345,10 +344,13 @@ fn turn_window(options: &TeamContextOptions) -> Result<(Option<usize>, Option<us
     Ok((options.from_turn, options.to_turn))
 }
 
-pub fn print_hits(hits: &[SearchHit]) {
+pub fn print_hits(hits: &[SearchHit], total: usize) {
     if hits.is_empty() {
         println!("No team conversations matched.");
         return;
+    }
+    if total > hits.len() {
+        println!("Showing {} of {} sessions; narrow with filters or raise --limit (max 50).\n", hits.len(), total);
     }
     for (index, hit) in hits.iter().enumerate() {
         let title = hit.title.as_deref().unwrap_or("(untitled)");
@@ -446,7 +448,7 @@ mod tests {
     fn search_sends_key_filters_and_parses_hits() {
         let (url, head) = serve_once("200 OK", HIT);
         let client = TeamClient::new(format!("{url}/"), "op_key".into());
-        let hits = client
+        let page = client
             .search(&TeamSearchOptions {
                 query: "escalation task".into(),
                 mode: Some(SearchMode::Regex),
@@ -458,6 +460,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
+        let hits = page.results;
 
         let head = head.recv().unwrap();
         let request_line = head.lines().next().unwrap();
@@ -478,6 +481,7 @@ mod tests {
         assert_eq!(hits[0].turn, 142);
         assert_eq!(hits[0].client(), Some("f614a811"));
         assert_eq!(hits[0].git_remotes, vec!["SmartUp-Chile/smartorders".to_string()]);
+        assert_eq!(page.total, 1);
     }
 
     #[test]
