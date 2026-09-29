@@ -15,6 +15,12 @@ brew update && brew upgrade fainder
 fainder doctor
 ```
 
+On Linux, install the prebuilt binary (see `docs/LINUX.md` in the repo):
+
+```bash
+curl -fsSL "https://github.com/satelerd/fainder/releases/latest/download/fainder-$(uname -m)-unknown-linux-gnu.tar.gz" | tar -xz -C ~/.local/bin
+```
+
 Supported providers:
 
 - `codex`
@@ -187,4 +193,7 @@ cursor = "~/Library/Application Support/Cursor/User/workspaceStorage"
 copilot = "~/Library/Application Support/Code/User/workspaceStorage"
 kiro = "~/Library/Application Support/kiro-cli/data.sqlite3"
 ```
+
+Those are the macOS defaults; on Linux Cursor and Copilot default to
+`~/.config/...` and Kiro to `~/.local/share/kiro-cli/data.sqlite3`.
 
