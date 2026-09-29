@@ -55,18 +55,18 @@ impl Config {
             home.join(".local/share/opencode/opencode.db"),
         );
         paths.insert(ProviderKind::Hermes, home.join(".hermes/sessions"));
+        // ~/Library/Application Support on macOS; ~/.config and ~/.local/share on Linux.
+        let app_config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+        let app_data = dirs::data_dir().unwrap_or_else(|| home.join(".local/share"));
         paths.insert(
             ProviderKind::Cursor,
-            home.join("Library/Application Support/Cursor/User/workspaceStorage"),
+            app_config.join("Cursor/User/workspaceStorage"),
         );
         paths.insert(
             ProviderKind::Copilot,
-            home.join("Library/Application Support/Code/User/workspaceStorage"),
+            app_config.join("Code/User/workspaceStorage"),
         );
-        paths.insert(
-            ProviderKind::Kiro,
-            home.join("Library/Application Support/kiro-cli/data.sqlite3"),
-        );
+        paths.insert(ProviderKind::Kiro, app_data.join("kiro-cli/data.sqlite3"));
 
         let mut team = TeamConfig::default();
         let config_path = config_path(&home);
