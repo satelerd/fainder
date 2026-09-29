@@ -68,6 +68,30 @@ fainder context codex:019dec17 --tail 80 --truncate-tools
 
 Large context views show a token estimate first and require `--confirm`.
 
+## Team Mode
+
+`fainder team` searches the conversations your teammates reviewed and uploaded,
+through the SmartUp admin API. Local search never touches the network; only
+`team` does.
+
+```toml
+# ~/.config/fainder/config.toml
+[team]
+url = "https://admin.smartup.lat"
+api_key_env = "FAINDER_TEAM_KEY"  # default
+```
+
+```bash
+export FAINDER_TEAM_KEY=...   # your personal operator key (admin, Profile > My Keys)
+fainder team search "rollback" --client pull-a-part --since 2026-09-01
+fainder team search "escalation_task_id" --regex --task DIN-04 --json
+fainder team context sat:claude:e52f2113 --around 142
+```
+
+The key needs the `devinsights:read` scope. Teammates' sessions can't be
+resumed here, so results carry a `team context` command instead of a
+`resume_command`. The wire contract is documented at the top of `src/team.rs`.
+
 ## Raycast
 
 The repo includes an optional Raycast extension that uses the Fainder CLI:

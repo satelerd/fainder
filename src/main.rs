@@ -4,6 +4,7 @@ mod config;
 mod model;
 mod providers;
 mod search;
+mod team;
 mod transcript;
 mod tui;
 
@@ -172,6 +173,88 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Search the team's reviewed conversations through the SmartUp admin API.
+    Team {
+        #[command(subcommand)]
+        command: TeamCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TeamCommands {
+    /// Search every teammate's reviewed conversations.
+    Search {
+        query: String,
+        /// Treat the query as a regular expression (best for code identifiers).
+        #[arg(long, conflicts_with = "words")]
+        regex: bool,
+        /// Match each word independently (AND) instead of the exact phrase.
+        #[arg(long, conflicts_with = "regex")]
+        words: bool,
+        /// Only this dev's sessions.
+        #[arg(long)]
+        dev: Option<String>,
+        /// Only this harness, e.g. claude or codex.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Only sessions from this machine (the HMAC a search result shows).
+        #[arg(long)]
+        machine: Option<String>,
+        /// Only sessions whose primary or secondary repo is owner/repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Only sessions with this local project folder name.
+        #[arg(long)]
+        project: Option<String>,
+        /// Only sessions linked to this client (client hub id or slug).
+        #[arg(long)]
+        client: Option<String>,
+        /// Only sessions linked to this ShapeUp task (id or code, e.g. DIN-04).
+        #[arg(long)]
+        task: Option<String>,
+        /// Only sessions linked to this PR (OWNER/REPO#N or URL).
+        #[arg(long)]
+        pr: Option<String>,
+        /// Only sessions active on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only sessions active on or before this date (YYYY-MM-DD).
+        #[arg(long)]
+        until: Option<String>,
+        /// Maximum number of results.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print turns of a teammate's conversation, e.g. sat:claude:e52f2113.
+    Context {
+        /// Session reference formatted as dev:harness:id.
+        session: String,
+        /// Read a subagent's turns instead of the main session (the `key` a
+        /// search result shows).
+        #[arg(long)]
+        key: Option<String>,
+        /// First turn to include.
+        #[arg(long)]
+        from_turn: Option<usize>,
+        /// Last turn to include.
+        #[arg(long)]
+        to_turn: Option<usize>,
+        /// Print a window around a turn.
+        #[arg(long)]
+        around: Option<usize>,
+        /// Number of turns before/after --around.
+        #[arg(long, default_value_t = 10)]
+        context: usize,
+        /// Include tool results (fetched from S3 by the server).
+        #[arg(long)]
+        tools: bool,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -301,9 +384,81 @@ fn main() -> Result<()> {
                 json: json || matches!(format, ContextFormat::Json),
             },
         )?,
+        Some(Commands::Team { command }) => run_team(&config, command)?,
         None => tui::run(config)?,
     }
 
+    Ok(())
+}
+
+fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
+    let client = team::TeamClient::from_config(&config.team)?;
+    match command {
+        TeamCommands::Search {
+            query,
+            regex,
+            words,
+            dev,
+            harness,
+            machine,
+            repo,
+            project,
+            client: client_filter,
+            task,
+            pr,
+            since,
+            until,
+            limit,
+            json,
+        } => {
+            let (query, mode) = team::resolve_search_mode(&query, regex, words);
+            let hits = client.search(&team::TeamSearchOptions {
+                query,
+                mode: Some(mode),
+                dev,
+                harness,
+                machine,
+                repo,
+                project,
+                client: client_filter,
+                task,
+                pr,
+                since,
+                until,
+                limit,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                team::print_hits(&hits);
+            }
+        }
+        TeamCommands::Context {
+            session,
+            key,
+            from_turn,
+            to_turn,
+            around,
+            context,
+            tools,
+            json,
+        } => {
+            let response = client.turns(&team::TeamContextOptions {
+                session_ref: session,
+                key,
+                from_turn,
+                to_turn,
+                around,
+                context,
+                tools,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                team::print_turns(&response);
+            }
+        }
+    }
     Ok(())
 }
 
