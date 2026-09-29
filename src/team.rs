@@ -246,6 +246,23 @@ impl TeamClient {
     }
 }
 
+/// The server's text index splits `src/lib/auth.ts` into tokens, so a phrase or word
+/// search never finds an identifier or path whole. When the caller picked no mode and the
+/// query is a single word containing `/`, `\`, `.` or `::`, search it as a literal regex.
+pub fn resolve_search_mode(query: &str, regex: bool, words: bool) -> (String, SearchMode) {
+    if regex {
+        return (query.to_string(), SearchMode::Regex);
+    }
+    if words {
+        return (query.to_string(), SearchMode::Words);
+    }
+    let single_word = query.split_whitespace().count() == 1;
+    if single_word && (query.contains(['/', '\\', '.']) || query.contains("::")) {
+        return (regex::escape(query), SearchMode::Regex);
+    }
+    (query.to_string(), SearchMode::Phrase)
+}
+
 fn mode_param(mode: SearchMode) -> &'static str {
     match mode {
         SearchMode::Phrase => "phrase",
@@ -530,5 +547,25 @@ mod tests {
         assert_eq!(hit.client(), Some("f614a811"));
         hit.links.retain(|l| l.kind != "client");
         assert_eq!(hit.client(), None);
+    }
+
+    #[test]
+    fn identifiers_and_paths_default_to_literal_regex() {
+        let (q, mode) = resolve_search_mode("src/lib/a.ts", false, false);
+        assert_eq!(q, r"src/lib/a\.ts");
+        assert!(matches!(mode, SearchMode::Regex));
+        let (q, mode) = resolve_search_mode("Foo::bar", false, false);
+        assert_eq!(q, "Foo::bar");
+        assert!(matches!(mode, SearchMode::Regex));
+    }
+
+    #[test]
+    fn plain_queries_and_explicit_flags_keep_their_mode() {
+        assert!(matches!(resolve_search_mode("rollback", false, false).1, SearchMode::Phrase));
+        assert!(matches!(resolve_search_mode("see a.ts now", false, false).1, SearchMode::Phrase));
+        assert!(matches!(resolve_search_mode("a/b.ts", false, true).1, SearchMode::Words));
+        let (q, mode) = resolve_search_mode("a.*b", true, false);
+        assert_eq!(q, "a.*b");
+        assert!(matches!(mode, SearchMode::Regex));
     }
 }
