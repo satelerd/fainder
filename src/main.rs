@@ -411,13 +411,7 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
             limit,
             json,
         } => {
-            let mode = if regex {
-                SearchMode::Regex
-            } else if words {
-                SearchMode::Words
-            } else {
-                SearchMode::Phrase
-            };
+            let (query, mode) = team::resolve_search_mode(&query, regex, words);
             let hits = client.search(&team::TeamSearchOptions {
                 query,
                 mode: Some(mode),
