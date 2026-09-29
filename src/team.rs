@@ -299,10 +299,18 @@ fn read_json<T: serde::de::DeserializeOwned>(
         404 => bail!("not found (404): the session does not exist or was withdrawn"),
         _ => {
             let body = response.body_mut().read_to_string().unwrap_or_default();
-            let body: String = body.chars().take(300).collect();
-            bail!("team index returned {status}: {body}")
+            bail!("team index returned {status}: {}", error_message(&body))
         }
     }
+}
+
+/// The `message` of admin's error body (`{"error": true, "code", "message"}`),
+/// or the first 300 characters of whatever came back instead.
+fn error_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| body.chars().take(300).collect())
 }
 
 /// `{dev}:{harness}:{native_id}`. Checked before building the URL so a typo
@@ -510,6 +518,27 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("devinsights:read"));
+    }
+
+    #[test]
+    fn api_errors_show_the_server_message() {
+        let (url, _head) = serve_once(
+            "422 Unprocessable Entity",
+            r#"{"error":true,"code":"validation_error","message":"'limit' debe estar entre 1 y 50"}"#,
+        );
+        let client = TeamClient::new(url, "k".into());
+        let err = client
+            .search(&TeamSearchOptions {
+                query: "x".into(),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "team index returned 422: 'limit' debe estar entre 1 y 50"
+        );
+        assert_eq!(error_message("<html>bad gateway</html>"), "<html>bad gateway</html>");
     }
 
     #[test]
