@@ -16,7 +16,7 @@ use model::{ProviderKind, SearchMode, SearchOptions};
 use transcript::{ContextOptions, InspectOptions, RoleFilter};
 
 #[derive(Parser)]
-#[command(name = "fainder")]
+#[command(name = "fainder", version)]
 #[command(about = "Live universal finder for local AI agent conversations")]
 struct Cli {
     #[command(subcommand)]
