@@ -251,19 +251,20 @@ impl TeamClient {
 
 /// The server's text index splits `src/lib/auth.ts` into tokens, so a phrase or word
 /// search never finds an identifier or path whole. When the caller picked no mode and the
-/// query is a single word containing `/`, `\`, `.` or `::`, search it as a literal regex.
-pub fn resolve_search_mode(query: &str, regex: bool, words: bool) -> (String, SearchMode) {
+/// query is a single word containing `/`, `\\`, `.` or `::`, search it as a literal regex.
+/// Otherwise the default is `words`, the same default the API and the team-search skill use.
+pub fn resolve_search_mode(query: &str, regex: bool, phrase: bool) -> (String, SearchMode) {
     if regex {
         return (query.to_string(), SearchMode::Regex);
     }
-    if words {
-        return (query.to_string(), SearchMode::Words);
+    if phrase {
+        return (query.to_string(), SearchMode::Phrase);
     }
     let single_word = query.split_whitespace().count() == 1;
     if single_word && (query.contains(['/', '\\', '.']) || query.contains("::")) {
         return (regex::escape(query), SearchMode::Regex);
     }
-    (query.to_string(), SearchMode::Phrase)
+    (query.to_string(), SearchMode::Words)
 }
 
 fn mode_param(mode: SearchMode) -> &'static str {
@@ -598,9 +599,10 @@ mod tests {
 
     #[test]
     fn plain_queries_and_explicit_flags_keep_their_mode() {
-        assert!(matches!(resolve_search_mode("rollback", false, false).1, SearchMode::Phrase));
-        assert!(matches!(resolve_search_mode("see a.ts now", false, false).1, SearchMode::Phrase));
-        assert!(matches!(resolve_search_mode("a/b.ts", false, true).1, SearchMode::Words));
+        assert!(matches!(resolve_search_mode("rollback", false, false).1, SearchMode::Words));
+        assert!(matches!(resolve_search_mode("rollback login", false, false).1, SearchMode::Words));
+        assert!(matches!(resolve_search_mode("see a.ts now", false, false).1, SearchMode::Words));
+        assert!(matches!(resolve_search_mode("a/b.ts", false, true).1, SearchMode::Phrase));
         let (q, mode) = resolve_search_mode("a.*b", true, false);
         assert_eq!(q, "a.*b");
         assert!(matches!(mode, SearchMode::Regex));

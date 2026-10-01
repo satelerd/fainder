@@ -186,11 +186,14 @@ enum TeamCommands {
     Search {
         query: String,
         /// Treat the query as a regular expression (best for code identifiers).
-        #[arg(long, conflicts_with = "words")]
+        #[arg(long, conflicts_with_all = ["words", "phrase"])]
         regex: bool,
-        /// Match each word independently (AND) instead of the exact phrase.
-        #[arg(long, conflicts_with = "regex")]
+        /// Match every word in any order (the default, same as the API).
+        #[arg(long, conflicts_with_all = ["regex", "phrase"])]
         words: bool,
+        /// Match the exact phrase instead of every word.
+        #[arg(long, conflicts_with_all = ["regex", "words"])]
+        phrase: bool,
         /// Only this dev's sessions.
         #[arg(long)]
         dev: Option<String>,
@@ -397,7 +400,9 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
         TeamCommands::Search {
             query,
             regex,
-            words,
+            // `--words` is the default now; the flag stays so old scripts keep working.
+            words: _,
+            phrase,
             dev,
             harness,
             machine,
@@ -411,7 +416,7 @@ fn run_team(config: &config::Config, command: TeamCommands) -> Result<()> {
             limit,
             json,
         } => {
-            let (query, mode) = team::resolve_search_mode(&query, regex, words);
+            let (query, mode) = team::resolve_search_mode(&query, regex, phrase);
             let page = client.search(&team::TeamSearchOptions {
                 query,
                 mode: Some(mode),
