@@ -239,6 +239,14 @@ fn load_transcript_ref(config: &Config, session_ref: &str) -> Result<Transcript>
 fn load_transcript(config: &Config, provider: ProviderKind, id: &str) -> Result<Transcript> {
     let session = find_session(config, provider, id)?;
     let turns = match provider {
+        ProviderKind::Codex
+            if session
+                .transcript_path
+                .as_deref()
+                .is_some_and(providers::is_codex_history_db) =>
+        {
+            load_codex_history_transcript(&session)?
+        }
         ProviderKind::Codex => load_file_transcript(&session, codex_turn_from_value)?,
         ProviderKind::Claude => load_file_transcript(&session, claude_turns_from_value)?,
         ProviderKind::Hermes => load_file_transcript(&session, hermes_turns_from_value)?,
@@ -266,7 +274,16 @@ fn find_session(config: &Config, provider: ProviderKind, id: &str) -> Result<Ses
 
     let root = config.path(provider);
     let path = match provider {
-        ProviderKind::Codex => find_file_by_id(&root, id, &["jsonl"])?,
+        ProviderKind::Codex => {
+            let mut found = None;
+            for root in config.roots(provider) {
+                found = find_file_by_id(&root, id, &["jsonl"])?;
+                if found.is_some() {
+                    break;
+                }
+            }
+            found
+        }
         ProviderKind::Claude => find_file_by_id(&root.join("projects"), id, &["jsonl"])?,
         ProviderKind::Hermes => find_file_by_id(&root, id, &["jsonl", "json"])?,
         ProviderKind::Opencode
@@ -361,6 +378,32 @@ where
                 tool_result: partial.tool_result.map(|text| one_line(&text)),
             });
         }
+    }
+    Ok(turns)
+}
+
+/// Threads that only exist in Codex's `thread_history_1.sqlite` (no rollout
+/// JSONL left on disk). Only user and agent messages are projected.
+fn load_codex_history_transcript(session: &Session) -> Result<Vec<TranscriptTurn>> {
+    let path = session
+        .transcript_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("Codex session has no history database"))?;
+    let mut turns = Vec::new();
+    for (created, item_type, text) in providers::codex_history_messages(path, &session.id)? {
+        turns.push(TranscriptTurn {
+            turn: turns.len() + 1,
+            role: if item_type == "userMessage" {
+                TranscriptRole::User
+            } else {
+                TranscriptRole::Agent
+            },
+            timestamp: millis(created),
+            text: one_line(&text),
+            tool_name: None,
+            tool_input: None,
+            tool_result: None,
+        });
     }
     Ok(turns)
 }
@@ -663,6 +706,26 @@ fn codex_turn_from_value(value: &Value) -> Vec<PartialTurn> {
             let role = match payload.get("type").and_then(Value::as_str) {
                 Some("user_message") => TranscriptRole::User,
                 Some("agent_message") => TranscriptRole::Agent,
+                // Current rollouts carry messages only as completed items:
+                // `{"type":"item_completed","item":{"type":"UserMessage",...}}`.
+                Some("item_completed") => {
+                    let Some(item) = payload.get("item") else {
+                        return Vec::new();
+                    };
+                    let role = match item.get("type").and_then(Value::as_str) {
+                        Some("UserMessage") => TranscriptRole::User,
+                        Some("AgentMessage") => TranscriptRole::Agent,
+                        _ => return Vec::new(),
+                    };
+                    return vec![PartialTurn {
+                        role,
+                        timestamp,
+                        text: text_from_value(item.get("content").unwrap_or(item)),
+                        tool_name: None,
+                        tool_input: None,
+                        tool_result: None,
+                    }];
+                }
                 Some("task_started") | Some("token_count") => return Vec::new(),
                 _ => return Vec::new(),
             };
@@ -833,6 +896,7 @@ fn find_file_by_id(root: &Path, id: &str, extensions: &[&str]) -> Result<Option<
         return Ok(None);
     }
     for entry in WalkDir::new(root)
+        .follow_links(true)
         .into_iter()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
@@ -1488,5 +1552,66 @@ mod kiro_tests {
         let session = kiro_session("does-not-exist", &db.path);
         let turns = load_kiro_transcript(&session).expect("load transcript");
         assert!(turns.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    /// Synthetic lines in the shape Codex CLI 0.16x writes to rollout files:
+    /// messages arrive only as `event_msg` / `item_completed`, never as
+    /// `user_message` / `agent_message` events.
+    #[test]
+    fn reads_messages_from_item_completed_events() {
+        let lines = [
+            serde_json::json!({
+                "timestamp": "2026-10-24T13:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "t-1",
+                    "turn_id": "turn-1",
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "item-1",
+                        "client_id": "c-1",
+                        "content": [{"type": "text", "text": "revisa el webhook de kapso", "text_elements": []}]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-10-24T13:00:05.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "item-2",
+                        "content": [{"type": "Text", "text": "el webhook responde 200"}],
+                        "phase": "final"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "item_completed", "item": {"type": "Reasoning", "id": "item-3"}}
+            }),
+        ];
+        let turns = lines
+            .iter()
+            .flat_map(codex_turn_from_value)
+            .map(|turn| (turn.role, turn.text))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            turns,
+            vec![
+                (
+                    TranscriptRole::User,
+                    "revisa el webhook de kapso".to_string()
+                ),
+                (TranscriptRole::Agent, "el webhook responde 200".to_string()),
+            ]
+        );
     }
 }
