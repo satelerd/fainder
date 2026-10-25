@@ -74,6 +74,22 @@ fainder context codex:019dec17 --tail 80 --truncate-tools
 
 Large context views show a token estimate first and require `--confirm`.
 
+## Codex homes
+
+Fainder reads `~/.codex` plus `$CODEX_HOME` and any sibling `~/.codex-*`
+folder that has a `sessions/` directory, so a second Codex profile shows up
+without configuration. Sessions from a non-default home resume with
+`CODEX_HOME=<home> codex resume <id>`. Symlinked `sessions/YYYY/MM` folders
+are followed, and threads whose rollout JSONL Codex already migrated into
+`state_5.sqlite` / `thread_history_1.sqlite` are listed, searched, and opened
+from those databases (user and agent messages only). To set the homes by hand:
+
+```toml
+# ~/.config/fainder/config.toml
+[paths]
+codex = ["~/.codex", "~/.codex-orq"]
+```
+
 ## Team Mode
 
 `fainder team` searches the conversations your teammates reviewed and uploaded,
