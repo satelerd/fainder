@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use shell_escape::escape;
 use walkdir::WalkDir;
@@ -17,7 +17,7 @@ use crate::search::{Matcher, highlightless_snippet};
 
 pub fn sessions(config: &Config, provider: ProviderKind) -> Result<Vec<Session>> {
     match provider {
-        ProviderKind::Codex => codex_sessions(&config.path(provider)),
+        ProviderKind::Codex => codex_sessions_all(&config.roots(provider)),
         ProviderKind::Claude => claude_sessions(&config.path(provider)),
         ProviderKind::Opencode => opencode_sessions(&config.path(provider)),
         ProviderKind::Hermes => hermes_sessions(&config.path(provider)),
@@ -34,12 +34,23 @@ pub fn recent_sessions(
 ) -> Result<Vec<Session>> {
     let limit = limit.max(1);
     match provider {
-        ProviderKind::Codex => recent_file_sessions(
-            &config.path(provider).join("sessions"),
-            limit,
-            |path| !skip_codex_path(path),
-            codex_session_from_transcript,
-        ),
+        ProviderKind::Codex => {
+            let mut sessions = Vec::new();
+            for root in config.roots(provider) {
+                let mut found = recent_file_sessions(
+                    &root.join("sessions"),
+                    limit,
+                    |path| !skip_codex_path(path),
+                    codex_session_from_transcript,
+                )?;
+                found.extend(codex_history_sessions(&root)?);
+                sessions.extend(with_codex_home(found, &root));
+            }
+            let mut sessions = merged_sessions(sessions);
+            sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+            sessions.truncate(limit);
+            Ok(sessions)
+        }
         ProviderKind::Claude => recent_file_sessions(
             &config.path(provider).join("projects"),
             limit,
@@ -82,13 +93,38 @@ pub fn content_sessions(
     limit: usize,
 ) -> Result<Vec<(Session, Vec<String>)>> {
     match provider {
-        ProviderKind::Codex => file_content_sessions(
-            &config.path(provider),
-            matcher,
-            query,
-            limit,
-            codex_session_from_transcript,
-        ),
+        ProviderKind::Codex => {
+            let mut results: Vec<(Session, Vec<String>)> = Vec::new();
+            for root in config.roots(provider) {
+                if results.len() >= limit {
+                    break;
+                }
+                let remaining = limit - results.len();
+                let mut found = file_content_sessions(
+                    &root,
+                    matcher,
+                    query,
+                    remaining,
+                    codex_session_from_transcript,
+                )?;
+                if found.len() < remaining {
+                    found.extend(codex_history_content_sessions(
+                        &root,
+                        matcher,
+                        query,
+                        remaining - found.len(),
+                    )?);
+                }
+                for (session, snippets) in found {
+                    let session = with_codex_home(vec![session], &root).remove(0);
+                    if !results.iter().any(|(seen, _)| seen.id == session.id) {
+                        results.push((session, snippets));
+                    }
+                }
+            }
+            results.truncate(limit);
+            Ok(results)
+        }
         ProviderKind::Claude => file_content_sessions(
             &config.path(provider).join("projects"),
             matcher,
@@ -170,6 +206,14 @@ pub fn doctor(config: &Config) -> Result<Vec<ProviderReport>> {
     Ok(reports)
 }
 
+fn codex_sessions_all(roots: &[PathBuf]) -> Result<Vec<Session>> {
+    let mut sessions = Vec::new();
+    for root in roots {
+        sessions.extend(with_codex_home(codex_sessions(root)?, root));
+    }
+    Ok(merged_sessions(sessions))
+}
+
 fn codex_sessions(root: &Path) -> Result<Vec<Session>> {
     let mut sessions = Vec::new();
     let index = root.join("session_index.jsonl");
@@ -206,6 +250,7 @@ fn codex_sessions(root: &Path) -> Result<Vec<Session>> {
             sessions.push(session);
         }
     }
+    sessions.extend(codex_history_sessions(root)?);
 
     Ok(merged_sessions(sessions))
 }
@@ -1266,6 +1311,7 @@ fn matching_paths(root: &Path, query: &str, limit: usize) -> Vec<PathBuf> {
     let output = Command::new("rg")
         .arg("--files-with-matches")
         .arg("--ignore-case")
+        .arg("--follow")
         .arg("--glob")
         .arg("*.json")
         .arg("--glob")
@@ -1324,7 +1370,7 @@ fn file_content_snippets(
     let Some(path) = &session.transcript_path else {
         return Ok(Vec::new());
     };
-    if !path.exists() {
+    if !path.exists() || is_codex_history_db(path) {
         return Ok(Vec::new());
     }
     let file = File::open(path)?;
@@ -1433,10 +1479,12 @@ fn json_files(root: &Path, recursive: bool) -> Vec<PathBuf> {
     if !root.exists() {
         return Vec::new();
     }
+    // Follow links: Codex users move old `sessions/YYYY/MM` folders to
+    // another disk and leave a symlink behind.
     let walker = if recursive {
-        WalkDir::new(root)
+        WalkDir::new(root).follow_links(true)
     } else {
-        WalkDir::new(root).max_depth(1)
+        WalkDir::new(root).max_depth(1).follow_links(true)
     };
     walker
         .into_iter()
@@ -1459,6 +1507,212 @@ fn skip_codex_path(path: &Path) -> bool {
         || text.contains("/shell_snapshots/")
         || text.contains("/ambient-suggestions/")
         || path.file_name().and_then(|n| n.to_str()) == Some("session_index.jsonl")
+}
+
+/// Codex 0.16x keeps thread metadata in `state_5.sqlite` and, for threads in
+/// `paginated` history mode, a projection of every item in
+/// `thread_history_1.sqlite`. Older rollout JSONL files get migrated there and
+/// removed, so those threads only exist in the databases.
+const CODEX_STATE_DB: &str = "state_5.sqlite";
+const CODEX_HISTORY_DB: &str = "thread_history_1.sqlite";
+
+pub fn is_codex_history_db(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(CODEX_HISTORY_DB)
+}
+
+fn open_read_only(path: &Path) -> Result<Connection> {
+    Ok(Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?)
+}
+
+/// Sessions for threads whose rollout file no longer exists. Threads that
+/// still have their JSONL are left to `codex_session_from_transcript`.
+fn codex_history_sessions(root: &Path) -> Result<Vec<Session>> {
+    let state = root.join(CODEX_STATE_DB);
+    let history = root.join(CODEX_HISTORY_DB);
+    if !state.exists() || !history.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = open_read_only(&state)?;
+    let mut stmt = conn.prepare(
+        "select id, rollout_path, created_at, updated_at, source, cwd, title, \
+         first_user_message, name from threads",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+        ))
+    })?;
+    let mut sessions = Vec::new();
+    for row in rows.filter_map(|row| row.ok()) {
+        let (id, rollout, created, updated, source, cwd, title, first_message, name) = row;
+        // Same rule as the JSONL parser: subagents and guardian reviews stay out.
+        if source.contains("\"subagent\"") || Path::new(&rollout).exists() {
+            continue;
+        }
+        let title = [name.unwrap_or_default(), title, first_message]
+            .into_iter()
+            .find(|text| !text.trim().is_empty() && !is_context_message(text))
+            .map(|text| short_title(&text))
+            .unwrap_or_else(|| id.clone());
+        let cwd = (!cwd.is_empty()).then(|| PathBuf::from(cwd));
+        let resume_command = match &cwd {
+            Some(cwd) => format!("cd {} && codex resume {}", shell_path(cwd), shell(&id)),
+            None => format!("codex resume {}", shell(&id)),
+        };
+        sessions.push(Session {
+            provider: ProviderKind::Codex,
+            id,
+            title,
+            cwd,
+            created_at: Utc.timestamp_opt(created, 0).single(),
+            updated_at: Utc.timestamp_opt(updated, 0).single(),
+            message_count: None,
+            source_path: Some(state.clone()),
+            transcript_path: Some(history.clone()),
+            resume_command,
+            latest_messages: Vec::new(),
+        });
+    }
+    Ok(sessions)
+}
+
+/// User and agent messages of one thread from `thread_history_1.sqlite`, in
+/// order, as `(created_at_ms, item_type, text)`.
+pub fn codex_history_messages(
+    history: &Path,
+    thread_id: &str,
+) -> Result<Vec<(i64, String, String)>> {
+    let conn = open_read_only(history)?;
+    let mut stmt = conn.prepare(
+        "select created_at_ms, item_type, item_json from thread_items \
+         where thread_id = ?1 order by rollout_ordinal",
+    )?;
+    let rows = stmt.query_map([thread_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    Ok(rows
+        .filter_map(|row| row.ok())
+        .filter_map(|(created, item_type, raw)| {
+            let value = serde_json::from_str::<Value>(&raw).ok()?;
+            let text = codex_history_item_text(&value)?;
+            Some((created, item_type, text))
+        })
+        .collect())
+}
+
+pub fn codex_history_item_text(value: &Value) -> Option<String> {
+    let text = match value.get("type").and_then(Value::as_str)? {
+        "userMessage" => text_from_value(value.get("content")?),
+        "agentMessage" => string_field(value, "text")?,
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn codex_history_content_sessions(
+    root: &Path,
+    matcher: &Matcher,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(Session, Vec<String>)>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sessions = codex_history_sessions(root)?;
+    if sessions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let by_id: HashMap<&str, &Session> = sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let needle = query.split_whitespace().next().unwrap_or(query);
+    let pattern = format!(
+        "%{}%",
+        needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let conn = open_read_only(&root.join(CODEX_HISTORY_DB))?;
+    // One indexed lookup per migrated thread instead of a scan of every item:
+    // threads that still have a JSONL were already searched with rg.
+    let mut stmt = conn.prepare(
+        "select item_json from thread_items \
+         where thread_id = ?1 and item_json like ?2 escape '\\' \
+         and item_type in ('userMessage', 'agentMessage') \
+         order by rollout_ordinal",
+    )?;
+    let mut ordered = sessions.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    let mut order: Vec<String> = Vec::new();
+    let mut snippets: HashMap<String, Vec<String>> = HashMap::new();
+    for session in ordered {
+        if order.len() >= limit {
+            break;
+        }
+        let rows = stmt.query_map(rusqlite::params![session.id, pattern], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut found = Vec::new();
+        for raw in rows.filter_map(|row| row.ok()) {
+            let Some(text) = serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|value| codex_history_item_text(&value))
+            else {
+                continue;
+            };
+            if is_context_message(&text) || !matcher.is_match(&text) {
+                continue;
+            }
+            found.push(highlightless_snippet(&text, ""));
+            if found.len() >= 3 {
+                break;
+            }
+        }
+        if !found.is_empty() {
+            order.push(session.id.clone());
+            snippets.insert(session.id.clone(), found);
+        }
+    }
+    Ok(order
+        .into_iter()
+        .filter_map(|id| {
+            let session = (*by_id.get(id.as_str())?).clone();
+            let found = snippets.remove(&id)?;
+            Some((session, found))
+        })
+        .collect())
+}
+
+/// Sessions from a Codex home other than `~/.codex` only resume with that
+/// home selected, so the command carries `CODEX_HOME`.
+fn with_codex_home(sessions: Vec<Session>, root: &Path) -> Vec<Session> {
+    if root.file_name().and_then(|name| name.to_str()) == Some(".codex") {
+        return sessions;
+    }
+    let prefix = format!("CODEX_HOME={} codex resume ", shell_path(root));
+    sessions
+        .into_iter()
+        .map(|mut session| {
+            if !session.resume_command.contains("CODEX_HOME=") {
+                session.resume_command = session.resume_command.replace("codex resume ", &prefix);
+            }
+            session
+        })
+        .collect()
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -1861,5 +2115,312 @@ mod kiro_tests {
         let results = kiro_content_sessions(&db.path, &matcher, 10).expect("content search");
         assert_eq!(results.len(), 1);
         assert!(!results[0].1.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A throwaway Codex home with the layout Codex CLI 0.16x writes:
+    /// `sessions/YYYY/MM/DD/rollout-*.jsonl`, `state_5.sqlite` (thread
+    /// metadata) and `thread_history_1.sqlite` (paginated item projection).
+    /// Every value here is synthetic. Deleted on drop.
+    struct TempHome {
+        base: PathBuf,
+        root: PathBuf,
+    }
+
+    impl TempHome {
+        fn new(name: &str, home_dir: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let base = std::env::temp_dir().join(format!("fainder-codex-test-{name}-{nanos}"));
+            let root = base.join(home_dir);
+            fs::create_dir_all(root.join("sessions")).expect("create codex home");
+            Self { base, root }
+        }
+
+        fn write_rollout(&self, day_dir: &Path, id: &str, source: Value, user: &str) -> PathBuf {
+            fs::create_dir_all(day_dir).expect("create day dir");
+            let path = day_dir.join(format!("rollout-2026-10-24T10-00-00-{id}.jsonl"));
+            let lines = [
+                serde_json::json!({
+                    "timestamp": "2026-10-24T13:00:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": id,
+                        "timestamp": "2026-10-24T13:00:00.000Z",
+                        "cwd": "/tmp/fainder-fixture",
+                        "originator": "codex_cli_rs",
+                        "cli_version": "0.162.1",
+                        "source": source,
+                        "model_provider": "openai"
+                    }
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-10-24T13:00:01.000Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": user}]
+                    }
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-10-24T13:00:01.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": user, "images": []}
+                }),
+                serde_json::json!({
+                    "timestamp": "2026-10-24T13:00:05.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "listo, revisado"}
+                }),
+            ];
+            let body = lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&path, body).expect("write rollout");
+            path
+        }
+
+        /// One row per thread: `(id, rollout_path, source, title)`, plus the
+        /// user/agent items each thread has in the history projection.
+        fn seed_databases(&self, threads: &[(&str, &Path, &str, &str)], items: &[(&str, Value)]) {
+            let state = Connection::open(self.root.join(CODEX_STATE_DB)).expect("open state db");
+            state
+                .execute_batch(
+                    "create table threads (
+                        id text primary key,
+                        rollout_path text not null,
+                        created_at integer not null,
+                        updated_at integer not null,
+                        source text not null,
+                        model_provider text not null,
+                        cwd text not null,
+                        title text not null,
+                        first_user_message text not null default '',
+                        name text,
+                        history_mode text not null default 'legacy'
+                    );",
+                )
+                .expect("create threads");
+            for (id, rollout, source, title) in threads {
+                state
+                    .execute(
+                        "insert into threads (id, rollout_path, created_at, updated_at, source, \
+                         model_provider, cwd, title, first_user_message, history_mode) \
+                         values (?1, ?2, 1760000000, 1760000100, ?3, 'openai', \
+                         '/tmp/fainder-fixture', ?4, ?4, 'paginated')",
+                        rusqlite::params![id, rollout.to_string_lossy(), source, title],
+                    )
+                    .expect("insert thread");
+            }
+            let history =
+                Connection::open(self.root.join(CODEX_HISTORY_DB)).expect("open history db");
+            history
+                .execute_batch(
+                    "create table thread_items (
+                        thread_id text not null,
+                        turn_id text not null,
+                        item_id text not null,
+                        rollout_ordinal integer not null,
+                        created_at_ms integer not null,
+                        item_json text not null,
+                        item_type text not null default '',
+                        primary key (thread_id, turn_id, item_id)
+                    );",
+                )
+                .expect("create thread_items");
+            for (ordinal, (thread_id, item)) in items.iter().enumerate() {
+                history
+                    .execute(
+                        "insert into thread_items (thread_id, turn_id, item_id, rollout_ordinal, \
+                         created_at_ms, item_json, item_type) values (?1, 'turn-1', ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            thread_id,
+                            format!("item-{ordinal}"),
+                            ordinal as i64,
+                            1_760_000_000_000i64 + ordinal as i64,
+                            item.to_string(),
+                            item.get("type").and_then(Value::as_str).unwrap_or_default()
+                        ],
+                    )
+                    .expect("insert item");
+            }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn user_item(text: &str) -> Value {
+        serde_json::json!({
+            "type": "userMessage",
+            "id": "item-u",
+            "clientId": null,
+            "content": [{"type": "text", "text": text, "text_elements": []}]
+        })
+    }
+
+    fn agent_item(text: &str) -> Value {
+        serde_json::json!({"type": "agentMessage", "id": "item-a", "phase": null, "text": text})
+    }
+
+    const LIVE: &str = "019a0000-0000-7000-8000-000000000001";
+    const MIGRATED: &str = "019a0000-0000-7000-8000-000000000002";
+    const GUARDIAN: &str = "019a0000-0000-7000-8000-000000000003";
+
+    fn fixture(home_dir: &str) -> TempHome {
+        let home = TempHome::new("fixture", home_dir);
+        let day = home.root.join("sessions/2026/10/24");
+        let live = home.write_rollout(
+            &day,
+            LIVE,
+            Value::String("cli".to_string()),
+            "revisa el webhook de kapso",
+        );
+        home.write_rollout(
+            &day,
+            "019a0000-0000-7000-8000-000000000009",
+            serde_json::json!({"subagent": {"other": "guardian"}}),
+            "aprueba este comando",
+        );
+        let gone = home.root.join("sessions/2026/10/02/rollout-gone.jsonl");
+        home.seed_databases(
+            &[
+                (LIVE, &live, "cli", "revisa el webhook de kapso"),
+                (MIGRATED, &gone, "exec", "audita el pipeline de smartvoc"),
+                (
+                    GUARDIAN,
+                    &gone,
+                    "{\"subagent\":{\"other\":\"guardian\"}}",
+                    "guardian",
+                ),
+            ],
+            &[
+                (LIVE, user_item("revisa el webhook de kapso")),
+                (MIGRATED, user_item("audita el pipeline de smartvoc")),
+                (MIGRATED, agent_item("encontre dos batches con timeout")),
+                (GUARDIAN, user_item("timeout en el guardian")),
+            ],
+        );
+        home
+    }
+
+    #[test]
+    fn lists_jsonl_and_migrated_sqlite_threads_once() {
+        let home = fixture(".codex");
+        let sessions = codex_sessions(&home.root).expect("read codex home");
+        let mut ids = sessions.iter().map(|s| s.id.as_str()).collect::<Vec<_>>();
+        ids.sort();
+        // The guardian JSONL and the guardian thread stay out; the live thread
+        // appears once even though it is both a file and a database row.
+        assert_eq!(ids, vec![LIVE, MIGRATED]);
+        let migrated = sessions.iter().find(|s| s.id == MIGRATED).unwrap();
+        assert_eq!(migrated.title, "audita el pipeline de smartvoc");
+        assert!(
+            migrated
+                .transcript_path
+                .as_deref()
+                .is_some_and(is_codex_history_db)
+        );
+        assert_eq!(migrated.cwd, Some(PathBuf::from("/tmp/fainder-fixture")));
+    }
+
+    #[test]
+    fn content_search_reads_threads_that_only_live_in_sqlite() {
+        let home = fixture(".codex");
+        let matcher = Matcher::new("timeout", crate::model::SearchMode::Phrase).unwrap();
+        let results =
+            codex_history_content_sessions(&home.root, &matcher, "timeout", 10).expect("search");
+        // The guardian thread also says "timeout" but is not a session.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, MIGRATED);
+        assert_eq!(results[0].1.len(), 1);
+    }
+
+    #[test]
+    fn history_messages_come_back_in_order_with_roles() {
+        let home = fixture(".codex");
+        let messages = codex_history_messages(&home.root.join(CODEX_HISTORY_DB), MIGRATED)
+            .expect("read history");
+        let shape = messages
+            .iter()
+            .map(|(_, kind, text)| (kind.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                ("userMessage", "audita el pipeline de smartvoc"),
+                ("agentMessage", "encontre dos batches con timeout"),
+            ]
+        );
+    }
+
+    #[test]
+    fn second_codex_home_resumes_with_its_codex_home() {
+        let home = fixture(".codex-orq");
+        let sessions =
+            codex_sessions_all(std::slice::from_ref(&home.root)).expect("read second home");
+        assert_eq!(sessions.len(), 2);
+        for session in &sessions {
+            assert!(
+                session.resume_command.contains(&format!(
+                    "CODEX_HOME={} codex resume ",
+                    shell_path(&home.root)
+                )),
+                "{}",
+                session.resume_command
+            );
+        }
+
+        let default = fixture(".codex");
+        let sessions =
+            codex_sessions_all(std::slice::from_ref(&default.root)).expect("read default home");
+        assert!(
+            sessions
+                .iter()
+                .all(|s| !s.resume_command.contains("CODEX_HOME="))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_symlinked_month_folders() {
+        let home = TempHome::new("symlink", ".codex");
+        let elsewhere = home.base.join("other-disk/2026/07");
+        home.write_rollout(
+            &elsewhere.join("15"),
+            LIVE,
+            Value::String("cli".to_string()),
+            "migra el cluster de julio",
+        );
+        fs::create_dir_all(home.root.join("sessions/2026")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.root.join("sessions/2026/07")).unwrap();
+
+        let sessions = codex_sessions(&home.root).expect("read codex home");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title, "migra el cluster de julio");
+
+        let matcher = Matcher::new("cluster", crate::model::SearchMode::Phrase).unwrap();
+        let found = file_content_sessions(
+            &home.root,
+            &matcher,
+            "cluster",
+            10,
+            codex_session_from_transcript,
+        )
+        .expect("content search");
+        assert_eq!(found.len(), 1);
     }
 }
